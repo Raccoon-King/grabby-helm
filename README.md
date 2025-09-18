@@ -1,5 +1,20 @@
 # Rancher Helm Exporter
 
+```
+  _____ _____   _    ____  ____   __     __
+ / ____|  __ \ | |  |  _ \|  _ \  \ \   / /
+| |  __| |__) || |  | |_) | |_) |  \ \_/ /
+| | |_ |  _  / | |  |  _ <|  _ <    \   /
+| |__| | | \ \ | |__| |_) | |_) |    | |
+ \_____|_|  \_\ \____|____/|____/     |_|
+  _____ _                 _
+ / ____| |               | |
+| |    | |__   __ _ _ __ | |_ ___  _ __
+| |    | '_ \ / _` | '_ \| __/ _ \| '__|
+| |____| | | | (_| | | | | || (_) | |
+ \_____|_| |_|\__,_|_| |_|\__\___/|_|
+```
+
 This repository contains a command-line utility that inspects an existing Kubernetes
 workload (for example, a deployment that was manually installed through Rancher) and
 reconstructs the live resources into a Helm chart. The chart can then be versioned or
@@ -15,6 +30,8 @@ promoted through standard Helm-based workflows.
 - Normalises the exported manifests by trimming Kubernetes-managed metadata so they can
   be re-applied safely.
 - Optional `helm lint` integration to validate the generated chart.
+- Guided terminal interactive mode to combine multiple deployments and cherry-pick
+  supporting ConfigMaps, Secrets and Services before exporting.
 - Flexible filtering via namespaces, label selectors, inclusion/exclusion lists and
   control over whether Secrets are captured.
 
@@ -23,10 +40,17 @@ promoted through standard Helm-based workflows.
 - Python 3.9 or newer.
 - `kubectl` installed and configured with access to the target Rancher cluster.
 - `helm` installed if you wish to run `helm lint` as part of the export process.
-- Python dependencies listed in `requirements.txt` (`PyYAML`). Install them with:
+- Python dependencies listed in `requirements.txt` (only `PyYAML`). Install them with:
 
   ```bash
   pip install -r requirements.txt
+  ```
+
+  For air-gapped environments, download the `PyYAML` wheel that matches your platform
+  ahead of time and point `pip` at the directory containing the file:
+
+  ```bash
+  pip install --no-index --find-links /path/to/wheels -r requirements.txt
   ```
 
 ## Usage
@@ -55,6 +79,20 @@ Key arguments:
 - `--force`: Overwrite the output directory if it already exists.
 - `--lint`: Run `helm lint` after the manifests have been generated.
 - `--verbose`: Enable more detailed logging.
+- `--interactive`: Launch a built-in picker (↑/↓ to move, space to toggle, enter to
+  confirm) for combining deployments and selecting ConfigMaps, Secrets and Services.
+
+### Interactive selection walkthrough
+
+Run the exporter with `--interactive` to query Rancher via `kubectl` and present an
+interactive checklist:
+
+1. Pick one or more deployments to include in the chart.
+2. Review all ConfigMaps, Secrets and Services in the namespace. The exporter
+   preselects items referenced by the chosen deployments, and you can deselect any
+   that are not required.
+3. Confirm your choices to generate a chart containing exactly those resources. The
+   exporter automatically enables secret export when you pick any secrets.
 
 The generated chart mirrors the live objects as closely as possible while removing fields that
 Kubernetes manages automatically (timestamps, status blocks, generated names, pod template hashes
