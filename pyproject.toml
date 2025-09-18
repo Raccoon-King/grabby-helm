@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rancher-helm-exporter"
+version = "0.1.0"
+description = "Export live Kubernetes resources into a Helm chart"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [
+  { name = "Grabby Helm", email = "ops@example.com" }
+]
+dependencies = [
+  "PyYAML>=6.0",
+]
+
+[project.scripts]
+rancher-helm-exporter = "rancher_helm_exporter.cli:main"
