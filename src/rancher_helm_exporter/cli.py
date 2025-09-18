@@ -11,7 +11,9 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, MutableMapping, Optional, Sequence
+from typing import Dict, Iterable, List, MutableMapping, Optional, Sequence, Set
+
+from .interactive import build_interactive_plan
 
 # Ensure that PyYAML is available before importing it. The project intentionally avoids
 # wrapping imports in try/except blocks, so we rely on importlib to perform the check.
@@ -82,6 +84,12 @@ class ChartExporter:
         self.chart_path = Path(args.output_dir).expanduser().resolve()
         self.templates_path = self.chart_path / "templates"
         self.kubectl_base = self._build_kubectl_base()
+        raw_selection: Optional[Dict[str, Iterable[str]]] = getattr(args, "selection_names", None)
+        self.selection_names: Dict[str, Set[str]] = (
+            {resource: {str(name) for name in names} for resource, names in raw_selection.items()}
+            if raw_selection
+            else {}
+        )
 
     # ------------------------------------------------------------------
     # Public API
@@ -89,12 +97,12 @@ class ChartExporter:
     def run(self) -> None:
         """Execute the export pipeline."""
 
-        self._ensure_required_binaries()
+        self.ensure_required_binaries()
         self._prepare_chart_directory()
 
         exported: List[ExportResult] = []
         for resource in self._resources_to_process():
-            items = self._fetch_resource_items(resource)
+            items = self.list_resource_items(resource)
             if not items:
                 self.logger.debug("No %s found matching filter criteria", resource)
                 continue
@@ -127,7 +135,7 @@ class ChartExporter:
             base.extend(["--context", self.args.context])
         return base
 
-    def _ensure_required_binaries(self) -> None:
+    def ensure_required_binaries(self) -> None:
         for binary in ("kubectl",):
             if shutil.which(binary) is None:
                 raise SystemExit(f"Required executable '{binary}' was not found in PATH.")
@@ -160,7 +168,7 @@ class ChartExporter:
             resources.difference_update(res.lower() for res in self.args.exclude)
         return sorted(resources)
 
-    def _fetch_resource_items(self, resource: str) -> List[MutableMapping[str, object]]:
+    def list_resource_items(self, resource: str) -> List[MutableMapping[str, object]]:
         cmd = [*self.kubectl_base, "get", resource, "-n", self.args.namespace, "-o", "json"]
         if self.args.selector:
             cmd.extend(["-l", self.args.selector])
@@ -171,6 +179,14 @@ class ChartExporter:
         return items  # type: ignore[return-value]
 
     def _should_include_manifest(self, resource: str, manifest: MutableMapping[str, object]) -> bool:
+        selected_names = self.selection_names.get(resource)
+        if selected_names is not None:
+            name = self._manifest_name(manifest)
+            if name not in selected_names:
+                return False
+            if resource == "secrets":
+                return True
+
         if resource == "secrets" and not self.args.include_secrets:
             return False
 
@@ -180,6 +196,14 @@ class ChartExporter:
                 return False
 
         return True
+
+    def _manifest_name(self, manifest: MutableMapping[str, object]) -> str:
+        metadata = manifest.get("metadata")
+        if isinstance(metadata, MutableMapping):
+            name = metadata.get("name")
+            if isinstance(name, str):
+                return name
+        return ""
 
     def _clean_manifest(self, manifest: MutableMapping[str, object]) -> MutableMapping[str, object]:
         manifest.pop("status", None)
@@ -409,6 +433,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="Enable verbose logging",
     )
+    parser.add_argument(
+        "--interactive",
+        action="store_true",
+        help="Launch an interactive picker to choose deployments and related resources",
+    )
 
     args = parser.parse_args(argv)
 
@@ -425,6 +454,17 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
     args = parse_args(argv)
+    if args.interactive:
+        preview_exporter = ChartExporter(args)
+        preview_exporter.ensure_required_binaries()
+        plan = build_interactive_plan(preview_exporter)
+        if plan.resources():
+            args.only = sorted(plan.resources())
+        args.selection_names = plan.to_dict()
+        if plan.includes_secrets():
+            args.include_secrets = True
+            args.include_service_account_secrets = True
+
     exporter = ChartExporter(args)
     exporter.run()
 
