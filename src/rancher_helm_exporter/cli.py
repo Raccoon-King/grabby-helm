@@ -1,0 +1,433 @@
+"""Command line interface for exporting Kubernetes resources to a Helm chart."""
+from __future__ import annotations
+
+import argparse
+import importlib.util
+import json
+import logging
+import shlex
+import shutil
+import subprocess
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterable, List, MutableMapping, Optional, Sequence
+
+# Ensure that PyYAML is available before importing it. The project intentionally avoids
+# wrapping imports in try/except blocks, so we rely on importlib to perform the check.
+_YAML_SPEC = importlib.util.find_spec("yaml")
+if _YAML_SPEC is None:  # pragma: no cover - guard clause depends on environment
+    sys.exit(
+        "PyYAML is required to run this tool. Install dependencies with "
+        "`pip install -r requirements.txt`."
+    )
+if _YAML_SPEC.loader is None:  # pragma: no cover - safety check
+    sys.exit("PyYAML installation appears to be corrupted. Re-install the package and retry.")
+
+yaml = importlib.util.module_from_spec(_YAML_SPEC)
+_YAML_SPEC.loader.exec_module(yaml)
+
+
+@dataclass
+class ExportResult:
+    """Summary details for an exported Kubernetes resource."""
+
+    kind: str
+    name: str
+    path: Path
+
+
+SUPPORTED_RESOURCES: Sequence[str] = (
+    "deployments",
+    "statefulsets",
+    "daemonsets",
+    "cronjobs",
+    "jobs",
+    "services",
+    "configmaps",
+    "secrets",
+    "serviceaccounts",
+    "persistentvolumeclaims",
+    "ingresses",
+)
+
+# Fields that should be stripped from metadata in order to generate re-usable manifests.
+_METADATA_FIELDS_TO_DROP: Sequence[str] = (
+    "creationTimestamp",
+    "deletionGracePeriodSeconds",
+    "deletionTimestamp",
+    "generateName",
+    "generation",
+    "managedFields",
+    "ownerReferences",
+    "resourceVersion",
+    "selfLink",
+    "uid",
+)
+
+# Secret types that should be ignored by default. Service account tokens are ephemeral
+# objects that Kubernetes re-creates automatically and should typically not be captured in
+# Helm charts.
+_DEFAULT_SECRET_TYPES_TO_SKIP: Sequence[str] = (
+    "kubernetes.io/service-account-token",
+)
+
+
+class ChartExporter:
+    """Export Kubernetes API resources and render them into a Helm chart structure."""
+
+    def __init__(self, args: argparse.Namespace) -> None:
+        self.args = args
+        self.logger = logging.getLogger("rancher_helm_exporter")
+        self.chart_path = Path(args.output_dir).expanduser().resolve()
+        self.templates_path = self.chart_path / "templates"
+        self.kubectl_base = self._build_kubectl_base()
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+    def run(self) -> None:
+        """Execute the export pipeline."""
+
+        self._ensure_required_binaries()
+        self._prepare_chart_directory()
+
+        exported: List[ExportResult] = []
+        for resource in self._resources_to_process():
+            items = self._fetch_resource_items(resource)
+            if not items:
+                self.logger.debug("No %s found matching filter criteria", resource)
+                continue
+
+            for manifest in items:
+                if not self._should_include_manifest(resource, manifest):
+                    continue
+
+                cleaned_manifest = self._clean_manifest(manifest)
+                result = self._write_manifest(resource, cleaned_manifest)
+                exported.append(result)
+                self.logger.info("Exported %s/%s", result.kind, result.name)
+
+        if not exported:
+            self.logger.warning("No resources were exported. Review your filters and try again.")
+
+        if self.args.lint and shutil.which("helm"):
+            self._run_helm_lint()
+
+        self._write_summary(exported)
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+    def _build_kubectl_base(self) -> List[str]:
+        base = ["kubectl"]
+        if self.args.kubeconfig:
+            base.extend(["--kubeconfig", self.args.kubeconfig])
+        if self.args.context:
+            base.extend(["--context", self.args.context])
+        return base
+
+    def _ensure_required_binaries(self) -> None:
+        for binary in ("kubectl",):
+            if shutil.which(binary) is None:
+                raise SystemExit(f"Required executable '{binary}' was not found in PATH.")
+
+        if self.args.lint and shutil.which("helm") is None:
+            raise SystemExit("Helm must be installed to use the --lint option.")
+
+    def _prepare_chart_directory(self) -> None:
+        if self.chart_path.exists():
+            if not self.args.force:
+                raise SystemExit(
+                    f"Output directory '{self.chart_path}' already exists. Use --force to overwrite."
+                )
+            shutil.rmtree(self.chart_path)
+
+        self.templates_path.mkdir(parents=True, exist_ok=True)
+        (self.chart_path / "Chart.yaml").write_text(
+            self._render_chart_yaml(), encoding="utf-8"
+        )
+        (self.chart_path / "values.yaml").write_text(
+            "# Values file generated by rancher-helm-exporter\n", encoding="utf-8"
+        )
+        (self.chart_path / ".helmignore").write_text(self._default_helmignore(), encoding="utf-8")
+
+    def _resources_to_process(self) -> Iterable[str]:
+        resources = set(SUPPORTED_RESOURCES)
+        if self.args.only:
+            resources = {res.lower() for res in self.args.only}
+        if self.args.exclude:
+            resources.difference_update(res.lower() for res in self.args.exclude)
+        return sorted(resources)
+
+    def _fetch_resource_items(self, resource: str) -> List[MutableMapping[str, object]]:
+        cmd = [*self.kubectl_base, "get", resource, "-n", self.args.namespace, "-o", "json"]
+        if self.args.selector:
+            cmd.extend(["-l", self.args.selector])
+        output = self._run(cmd)
+        data = json.loads(output)
+        items = data.get("items", [])
+        items.sort(key=lambda item: item.get("metadata", {}).get("name", ""))  # type: ignore[no-any-return]
+        return items  # type: ignore[return-value]
+
+    def _should_include_manifest(self, resource: str, manifest: MutableMapping[str, object]) -> bool:
+        if resource == "secrets" and not self.args.include_secrets:
+            return False
+
+        if resource == "secrets" and not self.args.include_service_account_secrets:
+            secret_type = manifest.get("type")
+            if secret_type in _DEFAULT_SECRET_TYPES_TO_SKIP:
+                return False
+
+        return True
+
+    def _clean_manifest(self, manifest: MutableMapping[str, object]) -> MutableMapping[str, object]:
+        manifest.pop("status", None)
+        metadata = manifest.get("metadata")
+        if isinstance(metadata, MutableMapping):
+            for field in _METADATA_FIELDS_TO_DROP:
+                metadata.pop(field, None)
+
+            annotations = metadata.get("annotations")
+            if isinstance(annotations, MutableMapping):
+                for key in list(annotations):
+                    if key.startswith("kubectl.kubernetes.io") or key.endswith("last-applied-configuration"):
+                        annotations.pop(key, None)
+                if not annotations:
+                    metadata.pop("annotations", None)
+
+            labels = metadata.get("labels")
+            if isinstance(labels, MutableMapping) and "pod-template-hash" in labels:
+                labels.pop("pod-template-hash", None)
+
+            metadata.pop("namespace", None)
+
+        kind = manifest.get("kind")
+        if kind == "Service":
+            self._clean_service_manifest(manifest)
+        elif kind in {"Deployment", "StatefulSet", "DaemonSet", "ReplicaSet", "Job", "CronJob"}:
+            self._clean_pod_controller_manifest(manifest)
+        elif kind == "PersistentVolumeClaim":
+            self._clean_pvc_manifest(manifest)
+
+        return manifest
+
+    def _clean_service_manifest(self, manifest: MutableMapping[str, object]) -> None:
+        spec = manifest.get("spec")
+        if not isinstance(spec, MutableMapping):
+            return
+        for key in ("clusterIP", "clusterIPs", "ipFamilies", "ipFamilyPolicy", "sessionAffinityConfig"):
+            spec.pop(key, None)
+        if spec.get("type") == "ClusterIP" and spec.get("clusterIP") == "None":
+            spec.pop("clusterIP", None)
+
+    def _clean_pod_controller_manifest(self, manifest: MutableMapping[str, object]) -> None:
+        spec = manifest.get("spec")
+        if not isinstance(spec, MutableMapping):
+            return
+        template = spec.get("template")
+        if isinstance(template, MutableMapping):
+            tmpl_metadata = template.get("metadata")
+            if isinstance(tmpl_metadata, MutableMapping):
+                tmpl_metadata.pop("creationTimestamp", None)
+                annotations = tmpl_metadata.get("annotations")
+                if isinstance(annotations, MutableMapping):
+                    for key in list(annotations):
+                        if key.startswith("kubectl.kubernetes.io"):
+                            annotations.pop(key, None)
+                    if not annotations:
+                        tmpl_metadata.pop("annotations", None)
+                labels = tmpl_metadata.get("labels")
+                if isinstance(labels, MutableMapping) and "pod-template-hash" in labels:
+                    labels.pop("pod-template-hash", None)
+            spec.pop("revisionHistoryLimit", None)
+        spec.pop("progressDeadlineSeconds", None)
+
+    def _clean_pvc_manifest(self, manifest: MutableMapping[str, object]) -> None:
+        spec = manifest.get("spec")
+        if not isinstance(spec, MutableMapping):
+            return
+        for key in ("volumeName", "dataSource", "dataSourceRef"):
+            spec.pop(key, None)
+
+        metadata = manifest.get("metadata")
+        if isinstance(metadata, MutableMapping):
+            annotations = metadata.get("annotations")
+            if isinstance(annotations, MutableMapping):
+                for annotation in ("pv.kubernetes.io/bind-completed", "pv.kubernetes.io/bound-by-controller"):
+                    annotations.pop(annotation, None)
+                if not annotations:
+                    metadata.pop("annotations", None)
+
+    def _write_manifest(self, resource: str, manifest: MutableMapping[str, object]) -> ExportResult:
+        kind = manifest.get("kind", resource.title())
+        metadata = manifest.get("metadata", {})
+        name = metadata.get("name", "resource") if isinstance(metadata, MutableMapping) else "resource"
+        safe_name = self._slugify(str(name))
+        filename = f"{self.args.prefix}{resource}-{safe_name}.yaml"
+        output_path = self.templates_path / filename
+        yaml_text = yaml.safe_dump(manifest, sort_keys=False)
+        output_path.write_text(f"---\n{yaml_text}", encoding="utf-8")
+        return ExportResult(kind=str(kind), name=str(name), path=output_path)
+
+    def _write_summary(self, exported: Sequence[ExportResult]) -> None:
+        if not exported:
+            return
+
+        lines = ["# Export Summary", "", f"Generated {len(exported)} manifests:"]
+        for result in exported:
+            rel_path = result.path.relative_to(self.chart_path)
+            lines.append(f"- {result.kind}/{result.name}: templates/{rel_path.name}")
+        summary_path = self.chart_path / "EXPORT.md"
+        summary_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    def _run_helm_lint(self) -> None:
+        cmd = ["helm", "lint", str(self.chart_path)]
+        self.logger.info("Running helm lint on %s", self.chart_path)
+        try:
+            subprocess.run(cmd, check=True)
+        except subprocess.CalledProcessError as exc:  # pragma: no cover - passthrough
+            raise SystemExit(
+                "helm lint reported issues with the generated chart. Inspect the output above."
+            ) from exc
+
+    def _render_chart_yaml(self) -> str:
+        return (
+            "apiVersion: v2\n"
+            f"name: {self.args.release}\n"
+            "description: Helm chart generated from an existing Kubernetes deployment\n"
+            "type: application\n"
+            f"version: {self.args.chart_version}\n"
+            f"appVersion: \"{self.args.app_version}\"\n"
+        )
+
+    def _default_helmignore(self) -> str:
+        return (
+            "# Default .helmignore generated by rancher-helm-exporter\n"
+            "*.swp\n"
+            "*.tmp\n"
+            ".git\n"
+            "*.pyc\n"
+            "__pycache__/\n"
+        )
+
+    def _slugify(self, value: str) -> str:
+        allowed = []
+        for char in value.lower():
+            if char.isalnum() or char in {"-", "."}:
+                allowed.append(char)
+            else:
+                allowed.append("-")
+        slug = "".join(allowed).strip("-")
+        return slug or "resource"
+
+    def _run(self, cmd: Sequence[str]) -> str:
+        self.logger.debug("Running command: %s", shlex.join(cmd))
+        try:
+            completed = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        except subprocess.CalledProcessError as exc:  # pragma: no cover - passthrough
+            message = exc.stderr.strip() or exc.stdout.strip() or str(exc)
+            raise SystemExit(f"Command failed: {message}") from exc
+        return completed.stdout
+
+
+def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Capture live Kubernetes resources and generate a Helm chart",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("release", help="Name to use for the generated Helm chart")
+    parser.add_argument(
+        "--namespace",
+        default="default",
+        help="Namespace to inspect when fetching resources",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default="./generated-chart",
+        help="Directory where the chart will be written",
+    )
+    parser.add_argument(
+        "--selector",
+        help="Label selector used to filter resources (e.g. app=my-app)",
+    )
+    parser.add_argument(
+        "--only",
+        nargs="*",
+        help="Limit the export to the specified resource kinds",
+    )
+    parser.add_argument(
+        "--exclude",
+        nargs="*",
+        help="Exclude specific resource kinds from the export",
+    )
+    parser.add_argument(
+        "--kubeconfig",
+        help="Path to an alternate kubeconfig file",
+    )
+    parser.add_argument(
+        "--context",
+        help="Kubernetes context to use when executing kubectl commands",
+    )
+    parser.add_argument(
+        "--prefix",
+        default="",
+        help="Prefix to prepend to generated manifest filenames",
+    )
+    parser.add_argument(
+        "--include-secrets",
+        action="store_true",
+        help="Include Kubernetes Secret resources in the generated chart",
+    )
+    parser.add_argument(
+        "--include-service-account-secrets",
+        action="store_true",
+        help="Also capture service account token secrets (implies --include-secrets)",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite the output directory if it already exists",
+    )
+    parser.add_argument(
+        "--lint",
+        action="store_true",
+        help="Run 'helm lint' after generating the chart",
+    )
+    parser.add_argument(
+        "--chart-version",
+        default="0.1.0",
+        help="Chart version to set in Chart.yaml",
+    )
+    parser.add_argument(
+        "--app-version",
+        default="1.0.0",
+        help="Application version to set in Chart.yaml",
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Enable verbose logging",
+    )
+
+    args = parser.parse_args(argv)
+
+    if args.include_service_account_secrets:
+        args.include_secrets = True
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(levelname)s: %(message)s",
+    )
+
+    return args
+
+
+def main(argv: Optional[Sequence[str]] = None) -> None:
+    args = parse_args(argv)
+    exporter = ChartExporter(args)
+    exporter.run()
+
+
+if __name__ == "__main__":  # pragma: no cover
+    main()
