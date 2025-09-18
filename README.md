@@ -30,8 +30,9 @@ promoted through standard Helm-based workflows.
 - Normalises the exported manifests by trimming Kubernetes-managed metadata so they can
   be re-applied safely.
 - Optional `helm lint` integration to validate the generated chart.
-- Guided terminal interactive mode to combine multiple deployments and cherry-pick
-  supporting ConfigMaps, Secrets and Services before exporting.
+- Guided terminal interactive mode to combine multiple workloads and cherry-pick
+  supporting ConfigMaps, Secrets, Services, ServiceAccounts, PersistentVolumeClaims
+  and Ingresses before exporting.
 - Flexible filtering via namespaces, label selectors, inclusion/exclusion lists and
   control over whether Secrets are captured.
 
@@ -80,17 +81,20 @@ Key arguments:
 - `--lint`: Run `helm lint` after the manifests have been generated.
 - `--verbose`: Enable more detailed logging.
 - `--interactive`: Launch a built-in picker (↑/↓ to move, space to toggle, enter to
-  confirm) for combining deployments and selecting ConfigMaps, Secrets and Services.
+  confirm) for combining workloads and selecting ConfigMaps, Secrets, Services,
+  ServiceAccounts, PersistentVolumeClaims and Ingresses.
 
 ### Interactive selection walkthrough
 
 Run the exporter with `--interactive` to query Rancher via `kubectl` and present an
 interactive checklist:
 
-1. Pick one or more deployments to include in the chart.
-2. Review all ConfigMaps, Secrets and Services in the namespace. The exporter
-   preselects items referenced by the chosen deployments, and you can deselect any
-   that are not required.
+1. Pick one or more workloads (Deployments, StatefulSets, DaemonSets, CronJobs or
+   Jobs) to include in the chart.
+2. Review all supporting ConfigMaps, Secrets, Services, ServiceAccounts,
+   PersistentVolumeClaims and Ingresses in the namespace. The exporter preselects
+   items referenced by the chosen workloads, and you can deselect any that are not
+   required.
 3. Confirm your choices to generate a chart containing exactly those resources. The
    exporter automatically enables secret export when you pick any secrets.
 

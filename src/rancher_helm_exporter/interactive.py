@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import curses
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, Iterator, List, MutableMapping, Optional, Sequence, Set
+from typing import Dict, Iterable, Iterator, List, MutableMapping, Optional, Sequence, Set, Tuple
 
 
 @dataclass
@@ -31,26 +31,36 @@ class SelectionPlan:
 def build_interactive_plan(exporter: "_ResourceLister") -> SelectionPlan:
     """Capture the operator's desired resources via an interactive checklist."""
 
-    deployments = exporter.list_resource_items("deployments")
-    if not deployments:
-        raise SystemExit("No deployments were found in the namespace. Nothing to export.")
+    workload_resources = ("deployments", "statefulsets", "daemonsets", "cronjobs", "jobs")
+    workloads_by_resource: Dict[str, Dict[str, MutableMapping[str, object]]] = {}
+    for resource in workload_resources:
+        manifests = exporter.list_resource_items(resource)
+        named_manifests = {
+            name: manifest
+            for manifest in manifests
+            if (name := _manifest_name(manifest))
+        }
+        if named_manifests:
+            workloads_by_resource[resource] = named_manifests
 
-    deployments_by_name = {
-        _manifest_name(manifest): manifest for manifest in deployments if _manifest_name(manifest)
-    }
-    if not deployments_by_name:
-        raise SystemExit("Unable to determine deployment names. Aborting interactive session.")
+    if not workloads_by_resource:
+        raise SystemExit("No workloads were found in the namespace. Nothing to export.")
 
-    selected_deployment_names = _ask_deployments(deployments_by_name)
-    selected_deployments = [deployments_by_name[name] for name in selected_deployment_names]
+    selected_workloads = _ask_workloads(workloads_by_resource)
+    if not selected_workloads:
+        raise SystemExit("No workloads selected. Aborting interactive session.")
 
     plan = SelectionPlan()
-    plan.add("deployments", selected_deployment_names)
+    selected_workload_manifests: List[MutableMapping[str, object]] = []
+    for resource, name in selected_workloads:
+        manifest = workloads_by_resource[resource][name]
+        plan.add(resource, [name])
+        selected_workload_manifests.append(manifest)
 
     configmap_items = exporter.list_resource_items("configmaps")
     configmap_names = _manifest_names(configmap_items)
     default_configmaps = sorted(
-        _collect_configmaps(selected_deployments).intersection(configmap_names)
+        _collect_configmaps(selected_workload_manifests).intersection(configmap_names)
     )
     chosen_configmaps = _ask_multiple(
         "Select ConfigMaps to include",
@@ -61,7 +71,9 @@ def build_interactive_plan(exporter: "_ResourceLister") -> SelectionPlan:
 
     secret_items = exporter.list_resource_items("secrets")
     secret_names = _manifest_names(secret_items)
-    default_secrets = sorted(_collect_secrets(selected_deployments).intersection(secret_names))
+    default_secrets = sorted(
+        _collect_secrets(selected_workload_manifests).intersection(secret_names)
+    )
     chosen_secrets = _ask_multiple(
         "Select Secrets to include",
         secret_names,
@@ -69,15 +81,60 @@ def build_interactive_plan(exporter: "_ResourceLister") -> SelectionPlan:
     )
     plan.add("secrets", chosen_secrets)
 
+    service_account_items = exporter.list_resource_items("serviceaccounts")
+    service_account_names = _manifest_names(service_account_items)
+    default_service_accounts = sorted(
+        _collect_service_accounts(selected_workload_manifests).intersection(
+            service_account_names
+        )
+    )
+    chosen_service_accounts = _ask_multiple(
+        "Select ServiceAccounts to include",
+        service_account_names,
+        default=default_service_accounts,
+    )
+    plan.add("serviceaccounts", chosen_service_accounts)
+
+    pvc_items = exporter.list_resource_items("persistentvolumeclaims")
+    pvc_names = _manifest_names(pvc_items)
+    default_pvcs = sorted(
+        _collect_persistent_volume_claims(selected_workload_manifests).intersection(
+            pvc_names
+        )
+    )
+    chosen_pvcs = _ask_multiple(
+        "Select PersistentVolumeClaims to include",
+        pvc_names,
+        default=default_pvcs,
+    )
+    plan.add("persistentvolumeclaims", chosen_pvcs)
+
     service_items = exporter.list_resource_items("services")
     service_names = _manifest_names(service_items)
-    default_services = sorted(_services_matching_deployments(selected_deployments, service_items))
+    default_services = sorted(
+        _services_matching_workloads(selected_workload_manifests, service_items)
+    )
     chosen_services = _ask_multiple(
         "Select Services to include",
         service_names,
         default=default_services,
     )
     plan.add("services", chosen_services)
+
+    ingress_items = exporter.list_resource_items("ingresses")
+    ingress_names = _manifest_names(ingress_items)
+    default_ingresses = sorted(
+        _ingresses_for_services(
+            ingress_items,
+            set(chosen_services) if chosen_services else set(default_services),
+        ).intersection(ingress_names)
+    )
+    chosen_ingresses = _ask_multiple(
+        "Select Ingresses to include",
+        ingress_names,
+        default=default_ingresses,
+    )
+    plan.add("ingresses", chosen_ingresses)
 
     return plan
 
@@ -232,15 +289,20 @@ class _CheckboxPrompt:
         return [option.value for option in self.options if self.selected.get(option.value)]
 
 
-def _ask_deployments(deployments: Dict[str, MutableMapping[str, object]]) -> List[str]:
-    options = []
-    for name in sorted(deployments):
-        manifest = deployments[name]
-        replicas = _replica_count(manifest)
-        label = f"{name} ({replicas} replica{'s' if replicas != 1 else ''})"
-        options.append(_Option(label=label, value=name))
-    prompt = _CheckboxPrompt("Select deployments to export", options, minimum=1)
-    return _run_prompt(prompt)
+def _ask_workloads(
+    workloads: Dict[str, Dict[str, MutableMapping[str, object]]]
+) -> List[Tuple[str, str]]:
+    options: List[_Option] = []
+    value_map: Dict[str, Tuple[str, str]] = {}
+    for resource in sorted(workloads):
+        for name, manifest in sorted(workloads[resource].items()):
+            label = _format_workload_label(resource, manifest)
+            value = f"{resource}:{name}"
+            value_map[value] = (resource, name)
+            options.append(_Option(label=label, value=value))
+    prompt = _CheckboxPrompt("Select workloads to export", options, minimum=1)
+    chosen_values = _run_prompt(prompt)
+    return [value_map[value] for value in chosen_values if value in value_map]
 
 
 def _ask_multiple(
@@ -404,8 +466,35 @@ def _collect_secrets(deployments: Sequence[MutableMapping[str, object]]) -> Set[
     return names
 
 
-def _services_matching_deployments(
-    deployments: Sequence[MutableMapping[str, object]],
+def _format_workload_label(resource: str, manifest: MutableMapping[str, object]) -> str:
+    name = _manifest_name(manifest) or "<unknown>"
+    kind = manifest.get("kind")
+    if not isinstance(kind, str):
+        kind = resource.rstrip("s").title()
+
+    details: List[str] = []
+    if resource in {"deployments", "statefulsets"}:
+        replicas = _replica_count(manifest)
+        details.append(f"{replicas} replica{'s' if replicas != 1 else ''}")
+    elif resource == "cronjobs":
+        spec = manifest.get("spec")
+        if isinstance(spec, MutableMapping):
+            schedule = spec.get("schedule")
+            if isinstance(schedule, str) and schedule:
+                details.append(f"schedule {schedule}")
+    elif resource == "jobs":
+        spec = manifest.get("spec")
+        if isinstance(spec, MutableMapping):
+            completions = spec.get("completions")
+            if isinstance(completions, int):
+                details.append(f"{completions} completion{'s' if completions != 1 else ''}")
+
+    suffix = f" ({', '.join(details)})" if details else ""
+    return f"{kind} {name}{suffix}"
+
+
+def _services_matching_workloads(
+    workloads: Sequence[MutableMapping[str, object]],
     services: Sequence[MutableMapping[str, object]],
 ) -> Set[str]:
     matches: Set[str] = set()
@@ -415,7 +504,7 @@ def _services_matching_deployments(
             selector = selector.get("selector")
         if not isinstance(selector, MutableMapping) or not selector:
             continue
-        for deployment in deployments:
+        for deployment in workloads:
             labels = _pod_labels(deployment)
             if labels and all(labels.get(key) == value for key, value in selector.items()):
                 name = _manifest_name(service)
@@ -425,10 +514,113 @@ def _services_matching_deployments(
     return matches
 
 
+def _collect_service_accounts(
+    workloads: Sequence[MutableMapping[str, object]]
+) -> Set[str]:
+    names: Set[str] = set()
+    for manifest in workloads:
+        pod_spec = _pod_spec(manifest)
+        service_account = pod_spec.get("serviceAccountName") or pod_spec.get("serviceAccount")
+        if isinstance(service_account, str) and service_account:
+            names.add(service_account)
+    return names
+
+
+def _collect_persistent_volume_claims(
+    workloads: Sequence[MutableMapping[str, object]]
+) -> Set[str]:
+    names: Set[str] = set()
+    for manifest in workloads:
+        pod_spec = _pod_spec(manifest)
+        volumes = pod_spec.get("volumes")
+        if isinstance(volumes, list):
+            for volume in volumes:
+                if not isinstance(volume, MutableMapping):
+                    continue
+                claim = volume.get("persistentVolumeClaim")
+                if isinstance(claim, MutableMapping):
+                    name = claim.get("claimName") or claim.get("name")
+                    if isinstance(name, str) and name:
+                        names.add(name)
+    return names
+
+
+def _ingresses_for_services(
+    ingresses: Sequence[MutableMapping[str, object]],
+    services: Set[str],
+) -> Set[str]:
+    if not services:
+        return set()
+
+    matches: Set[str] = set()
+    for ingress in ingresses:
+        referenced = _services_referenced_by_ingress(ingress)
+        if referenced.intersection(services):
+            name = _manifest_name(ingress)
+            if name:
+                matches.add(name)
+    return matches
+
+
+def _services_referenced_by_ingress(
+    ingress: MutableMapping[str, object]
+) -> Set[str]:
+    names: Set[str] = set()
+    spec = ingress.get("spec")
+    if not isinstance(spec, MutableMapping):
+        return names
+
+    default_backend = spec.get("defaultBackend")
+    names.update(_services_from_backend(default_backend))
+
+    rules = spec.get("rules")
+    if isinstance(rules, list):
+        for rule in rules:
+            if not isinstance(rule, MutableMapping):
+                continue
+            http = rule.get("http")
+            if not isinstance(http, MutableMapping):
+                continue
+            paths = http.get("paths")
+            if isinstance(paths, list):
+                for path in paths:
+                    if isinstance(path, MutableMapping):
+                        backend = path.get("backend")
+                        names.update(_services_from_backend(backend))
+    return names
+
+
+def _services_from_backend(backend: object) -> Set[str]:
+    names: Set[str] = set()
+    if not isinstance(backend, MutableMapping):
+        return names
+
+    service = backend.get("service")
+    if isinstance(service, MutableMapping):
+        name = service.get("name")
+        if isinstance(name, str) and name:
+            names.add(name)
+
+    legacy_name = backend.get("serviceName")
+    if isinstance(legacy_name, str) and legacy_name:
+        names.add(legacy_name)
+
+    return names
+
+
 def _pod_spec(manifest: MutableMapping[str, object]) -> MutableMapping[str, object]:
     spec = manifest.get("spec")
     if not isinstance(spec, MutableMapping):
         return {}
+    job_template = spec.get("jobTemplate")
+    if isinstance(job_template, MutableMapping):
+        job_spec = job_template.get("spec")
+        if isinstance(job_spec, MutableMapping):
+            template = job_spec.get("template")
+            if isinstance(template, MutableMapping):
+                template_spec = template.get("spec")
+                if isinstance(template_spec, MutableMapping):
+                    return template_spec
     template = spec.get("template")
     if isinstance(template, MutableMapping):
         template_spec = template.get("spec")
@@ -451,6 +643,12 @@ def _pod_labels(manifest: MutableMapping[str, object]) -> Dict[str, str]:
     if not isinstance(spec, MutableMapping):
         return {}
     template = spec.get("template")
+    if not isinstance(template, MutableMapping):
+        job_template = spec.get("jobTemplate")
+        if isinstance(job_template, MutableMapping):
+            job_spec = job_template.get("spec")
+            if isinstance(job_spec, MutableMapping):
+                template = job_spec.get("template")
     if not isinstance(template, MutableMapping):
         return {}
     metadata = template.get("metadata")
