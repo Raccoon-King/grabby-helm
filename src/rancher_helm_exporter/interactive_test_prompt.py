@@ -1,7 +1,16 @@
 """Interactive prompts for test chart creation."""
 from __future__ import annotations
 
-import curses
+import sys
+
+if sys.platform == "win32":
+    def prompt_for_test_chart_options(release_name, output_dir, interactive=True):
+        if interactive:
+            print("Interactive test chart prompt is not supported on Windows.")
+        return TestChartOptions()
+
+else:
+    import curses
 from dataclasses import dataclass
 from typing import Optional
 

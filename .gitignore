@@ -6,3 +6,11 @@ __pycache__/
 # Virtual environments
 .venv/
 venv/
+
+# Ignore BMAD files
+.bmad-core/
+teams/
+# Ignore Claude files
+.claude/
+
+.gemini/

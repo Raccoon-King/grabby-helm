@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, MutableMapping, Optional, Sequence, Set
 
 from .interactive import build_interactive_plan
+from .utils import StringUtils
 
 # Import new improved modules
 try:
@@ -296,7 +297,7 @@ class ChartExporter:
         kind = manifest.get("kind", resource.title())
         metadata = manifest.get("metadata", {})
         name = metadata.get("name", "resource") if isinstance(metadata, MutableMapping) else "resource"
-        safe_name = self._slugify(str(name))
+        safe_name = StringUtils.slugify(str(name))
         filename = f"{self.args.prefix}{resource}-{safe_name}.yaml"
         output_path = self.templates_path / filename
         yaml_text = yaml.safe_dump(manifest, sort_keys=False)
@@ -344,15 +345,7 @@ class ChartExporter:
             "__pycache__/\n"
         )
 
-    def _slugify(self, value: str) -> str:
-        allowed = []
-        for char in value.lower():
-            if char.isalnum() or char in {"-", "."}:
-                allowed.append(char)
-            else:
-                allowed.append("-")
-        slug = "".join(allowed).strip("-")
-        return slug or "resource"
+
 
     def _run(self, cmd: Sequence[str]) -> str:
         self.logger.debug("Running command: %s", shlex.join(cmd))

@@ -1,0 +1,6 @@
+pytest>=7.0
+sphinx>=4.0
+sphinx_rtd_theme>=1.0
+pyreadline3>=3.4.1
+pip-audit>=2.4.0
+pip-tools>=6.0

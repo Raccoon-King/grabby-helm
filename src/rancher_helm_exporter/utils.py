@@ -432,20 +432,22 @@ class ResourceReferenceExtractor:
         return names
 
 
+def slugify(value: str) -> str:
+    """Convert a string to a filesystem-safe slug."""
+    allowed = []
+    for char in value.lower():
+        if char.isalnum() or char in {"-", "."}:
+            allowed.append(char)
+        else:
+            allowed.append("-")
+    slug = "".join(allowed).strip("-")
+    return slug
+
+
 class StringUtils:
     """String utility functions."""
     
-    @staticmethod
-    def slugify(value: str) -> str:
-        """Convert a string to a filesystem-safe slug."""
-        allowed = []
-        for char in value.lower():
-            if char.isalnum() or char in {"-", "."}:
-                allowed.append(char)
-            else:
-                allowed.append("-")
-        slug = "".join(allowed).strip("-")
-        return slug or "resource"
+    slugify = staticmethod(slugify)
     
     @staticmethod
     def truncate(text: str, width: int) -> str:
