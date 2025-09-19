@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, MutableMapping, Optional, Sequence, Set
 
 from .interactive import build_interactive_plan
+from .interactive_config import run_interactive_config, apply_config_to_namespace
 from .utils import StringUtils
 
 # Import new improved modules
@@ -362,7 +363,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         description="Capture live Kubernetes resources and generate a Helm chart",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("release", help="Name to use for the generated Helm chart")
+    parser.add_argument("release", nargs='?', help="Name to use for the generated Helm chart")
     parser.add_argument(
         "--namespace",
         default="default",
@@ -440,6 +441,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="Launch an interactive picker to choose deployments and related resources",
     )
+    parser.add_argument(
+        "--config-prompt",
+        action="store_true",
+        help="Use interactive configuration prompting",
+    )
 
     args = parser.parse_args(argv)
 
@@ -461,9 +467,29 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             return improved_main(argv)
         except Exception as e:
             logging.warning("Falling back to legacy implementation due to: %s", e)
-    
+
     # Legacy implementation
     args = parse_args(argv)
+
+    # If no release name provided or config-prompt flag is used, run interactive config
+    if not args.release or args.config_prompt:
+        try:
+            config = run_interactive_config()
+            if config:
+                apply_config_to_namespace(args, config)
+
+            # Ensure we have a release name after interactive config
+            if not args.release:
+                print("No release name provided. Exiting.")
+                return
+
+        except KeyboardInterrupt:
+            print("\nOperation cancelled.")
+            return
+        except Exception as e:
+            logging.error("Interactive configuration failed: %s", e)
+            return
+
     if args.interactive:
         preview_exporter = ChartExporter(args)
         preview_exporter.ensure_required_binaries()
