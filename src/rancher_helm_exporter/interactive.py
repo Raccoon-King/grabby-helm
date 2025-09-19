@@ -1,7 +1,31 @@
 """Interactive selection helpers for the Rancher Helm exporter."""
 from __future__ import annotations
 
-import curses
+import sys
+
+if sys.platform == "win32":
+
+    class SelectionPlan:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def add(self, *args, **kwargs):
+            pass
+
+        def resources(self):
+            return set()
+
+        def to_dict(self):
+            return {}
+
+        def includes_secrets(self):
+            return False
+
+    def build_interactive_plan(exporter):
+        raise SystemExit("Interactive mode is not supported on Windows.")
+
+else:
+    import curses
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, Iterator, List, MutableMapping, Optional, Sequence, Set, Tuple
 

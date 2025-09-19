@@ -1,0 +1,2 @@
+[console_scripts]
+rancher-helm-exporter = rancher_helm_exporter.cli:main

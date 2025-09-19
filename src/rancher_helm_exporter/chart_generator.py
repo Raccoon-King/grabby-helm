@@ -462,8 +462,8 @@ class TemplateProcessor:
             if isinstance(labels, dict):
                 # Add Helm standard labels
                 labels.update({
-                    "helm.sh/chart": "{{ include \\"chart.chart\\" . }}",
-                    "app.kubernetes.io/name": "{{ include \\"chart.name\\" . }}",
+                    "helm.sh/chart": '{{ include "chart.chart" . }}',
+                    "app.kubernetes.io/name": '{{ include "chart.name" . }}',
                     "app.kubernetes.io/instance": "{{ .Release.Name }}",
                     "app.kubernetes.io/version": "{{ .Chart.AppVersion | quote }}",
                     "app.kubernetes.io/managed-by": "{{ .Release.Service }}",
