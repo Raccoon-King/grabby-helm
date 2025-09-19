@@ -1,0 +1,35 @@
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: database
+  labels:
+    app: database
+spec:
+  serviceName: database-headless
+  replicas: 3
+  selector:
+    matchLabels:
+      app: database
+  template:
+    metadata:
+      labels:
+        app: database
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:13
+        env:
+        - name: POSTGRES_DB
+          value: myapp
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 10Gi

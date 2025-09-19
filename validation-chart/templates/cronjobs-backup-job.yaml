@@ -1,0 +1,28 @@
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: backup-job
+  labels:
+    app: web-app
+spec:
+  schedule: "0 2 * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: backup
+            image: postgres:13
+            command:
+            - /bin/bash
+            - -c
+            - pg_dump -h database -U postgres myapp > /backup/backup-$(date +%Y%m%d).sql
+            volumeMounts:
+            - name: backup-storage
+              mountPath: /backup
+          volumes:
+          - name: backup-storage
+            persistentVolumeClaim:
+              claimName: backup-pvc
+          restartPolicy: OnFailure
