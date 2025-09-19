@@ -81,16 +81,26 @@ setup_build_environment() {
 }
 
 build_rpm() {
+    local system_mode="$1"
     print_status "Building RPM package..."
     
     cd ~/rpmbuild
     
+    # Set build options based on mode
+    local build_opts=""
+    if [[ "$system_mode" == "true" ]]; then
+        build_opts="--define '_system_mode 1'"
+        print_status "Building with system-wide features enabled"
+    else
+        print_status "Building with user-space only features"
+    fi
+    
     # Build source RPM
-    rpmbuild -bs SPECS/${PACKAGE_NAME}.spec
+    eval "rpmbuild -bs $build_opts SPECS/${PACKAGE_NAME}.spec"
     print_success "Source RPM built"
     
     # Build binary RPM
-    rpmbuild -bb SPECS/${PACKAGE_NAME}.spec
+    eval "rpmbuild -bb $build_opts SPECS/${PACKAGE_NAME}.spec"
     print_success "Binary RPM built"
     
     # Find built packages
@@ -194,7 +204,12 @@ print_usage() {
     echo "  --repo DIR     Create local repository in DIR"
     echo "  --test         Run package tests after build"
     echo "  --cleanup      Clean up build artifacts after build"
+    echo "  --system-mode  Build with system-wide features (requires root)"
     echo "  --help, -h     Show this help message"
+    echo ""
+    echo "Build modes:"
+    echo "  Default:       User-space only (no system user, services, or configs)"
+    echo "  --system-mode: Full system integration with systemd services"
     echo ""
 }
 
@@ -202,6 +217,7 @@ main() {
     local run_tests=false
     local cleanup_after=false
     local repo_dir=""
+    local system_mode=false
     
     # Parse command line arguments
     while [[ $# -gt 0 ]]; do
@@ -216,6 +232,10 @@ main() {
                 ;;
             --cleanup)
                 cleanup_after=true
+                shift
+                ;;
+            --system-mode)
+                system_mode=true
                 shift
                 ;;
             --help|-h)
@@ -235,7 +255,7 @@ main() {
     
     check_requirements
     setup_build_environment
-    build_rpm
+    build_rpm "$system_mode"
     
     if [[ "$run_tests" == "true" ]]; then
         test_rpm

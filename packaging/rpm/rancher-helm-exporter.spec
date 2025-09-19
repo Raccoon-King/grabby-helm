@@ -31,10 +31,12 @@ Recommends:     kubectl
 Recommends:     helm
 Recommends:     bash-completion
 
-# System user for service mode
+# System user for service mode (only needed for system-wide installation)
+%if 0%{?_system_mode:1}
 Requires(pre):  shadow-utils
 Requires:       systemd
 %{?systemd_requires}
+%endif
 
 %description
 Rancher Helm Exporter inspects existing Kubernetes workloads deployed through 
@@ -49,6 +51,11 @@ Features:
 - Robust kubectl interface with retry logic
 - Air-gapped environment support
 - Rich progress tracking and validation
+- User-space installation support (no sudo required)
+- Both system-wide and user-space operation modes
+
+This package can be installed in user-space mode (default) or system-wide mode
+by building with --define "_system_mode 1".
 
 %package doc
 Summary:        Documentation for %{name}
@@ -69,10 +76,13 @@ Documentation and examples for rancher-helm-exporter.
 # Install executable script
 install -Dm755 -t %{buildroot}%{_bindir} scripts/rancher-helm-exporter
 
-# Install configuration files
+# Install configuration files (conditional on system mode)
+%if 0%{?_system_mode:1}
 install -Dm644 config.example.yaml %{buildroot}%{_sysconfdir}/%{pypi_name}/config.yaml
+%endif
 
-# Install systemd service files
+# Install systemd service files (only for system-wide installation)
+%if 0%{?_system_mode:1}
 install -Dm644 scripts/systemd/rancher-helm-exporter@.service \
     %{buildroot}%{_unitdir}/rancher-helm-exporter@.service
 install -Dm644 scripts/systemd/rancher-helm-exporter.timer \
@@ -120,12 +130,14 @@ SyslogIdentifier=rancher-helm-exporter
 [Install]
 WantedBy=multi-user.target
 EOF
+%endif
 
 # Install bash completion
 install -Dm644 scripts/bash_completion.sh \
     %{buildroot}%{_datadir}/bash-completion/completions/%{pypi_name}
 
-# Install logrotate configuration
+# Install logrotate configuration (only for system mode)
+%if 0%{?_system_mode:1}
 install -Dm644 /dev/stdin %{buildroot}%{_sysconfdir}/logrotate.d/%{pypi_name} << 'EOF'
 /var/log/rancher-helm-exporter/*.log {
     daily
@@ -146,7 +158,9 @@ install -dm755 %{buildroot}%{_localstatedir}/lib/%{pypi_name}
 install -dm755 %{buildroot}%{_localstatedir}/lib/%{pypi_name}/exports
 install -dm755 %{buildroot}%{_localstatedir}/lib/%{pypi_name}/cache
 install -dm755 %{buildroot}%{_localstatedir}/log/%{pypi_name}
+%endif
 
+%if 0%{?_system_mode:1}
 %pre
 # Create system user and group
 getent group rancher-exporter >/dev/null || groupadd -r rancher-exporter
@@ -167,6 +181,7 @@ chown -R rancher-exporter:rancher-exporter %{_localstatedir}/log/%{pypi_name}
 
 %postun
 %systemd_postun_with_restart rancher-helm-exporter.service
+%endif
 
 %files
 %license LICENSE
@@ -174,6 +189,11 @@ chown -R rancher-exporter:rancher-exporter %{_localstatedir}/log/%{pypi_name}
 %{python3_sitelib}/*
 %{_bindir}/rancher-helm-exporter
 
+# Bash completion
+%{_datadir}/bash-completion/completions/%{pypi_name}
+
+# System-wide configuration and services (only for system mode)
+%if 0%{?_system_mode:1}
 # Configuration
 %dir %{_sysconfdir}/%{pypi_name}
 %config(noreplace) %{_sysconfdir}/%{pypi_name}/config.yaml
@@ -184,14 +204,12 @@ chown -R rancher-exporter:rancher-exporter %{_localstatedir}/log/%{pypi_name}
 %{_unitdir}/rancher-helm-exporter@.service
 %{_unitdir}/rancher-helm-exporter.timer
 
-# Bash completion
-%{_datadir}/bash-completion/completions/%{pypi_name}
-
 # Runtime directories
 %attr(755, rancher-exporter, rancher-exporter) %{_localstatedir}/lib/%{pypi_name}
 %attr(755, rancher-exporter, rancher-exporter) %{_localstatedir}/lib/%{pypi_name}/exports
 %attr(755, rancher-exporter, rancher-exporter) %{_localstatedir}/lib/%{pypi_name}/cache
 %attr(750, rancher-exporter, rancher-exporter) %{_localstatedir}/log/%{pypi_name}
+%endif
 
 %files doc
 %doc docs/*

@@ -40,18 +40,41 @@ promoted through standard Helm-based workflows.
 
 ## Installation
 
-### Fedora/RHEL Quick Install
+### User-Space Installation (No Sudo Required)
+
+**Recommended for most developers** - installs everything in user space without admin privileges:
 
 ```bash
-# Download and run the installer
+# Download and run the user-space installer
+curl -fsSL https://raw.githubusercontent.com/your-org/rancher-helm-exporter/main/scripts/install_no_sudo.sh -o install_no_sudo.sh
+chmod +x install_no_sudo.sh
+
+# Install completely in user space
+./install_no_sudo.sh
+```
+
+This installer:
+- Works without sudo/admin privileges
+- Installs Python (via Miniconda if needed)
+- Downloads kubectl and helm to `~/.local/bin`
+- Sets up bash completion and shell integration
+- Configures user systemd services
+- Uses only user directories (`~/.config`, `~/.local`)
+
+### Fedora/RHEL System-Wide Install
+
+For system administrators who want system-wide installation:
+
+```bash
+# Download the system installer
 curl -fsSL https://raw.githubusercontent.com/your-org/rancher-helm-exporter/main/scripts/install_fedora.sh -o install_fedora.sh
 chmod +x install_fedora.sh
 
-# Install with system dependencies
+# Install with system dependencies (requires sudo)
 ./install_fedora.sh --install-deps
 
-# Or install without system dependencies (if kubectl/helm already present)
-./install_fedora.sh
+# Or install user dependencies only
+./install_fedora.sh --install-user-deps
 ```
 
 ### Manual Installation
@@ -83,12 +106,13 @@ chmod +x install_fedora.sh
 
 ### RPM Package Installation
 
+#### User-Space RPM (Default)
 ```bash
-# Build RPM package
+# Build user-space RPM package
 cd packaging/rpm
 ./build_rpm.sh --repo /tmp/repo --test
 
-# Install from local repository
+# Install from local repository (no root services)
 sudo tee /etc/yum.repos.d/rancher-helm-exporter-local.repo << 'EOF'
 [rancher-helm-exporter-local]
 name=Rancher Helm Exporter Local Repository
@@ -98,6 +122,17 @@ gpgcheck=0
 EOF
 
 sudo dnf install python3-rancher-helm-exporter
+```
+
+#### System-Wide RPM
+```bash
+# Build with system-wide features (systemd services, system user)
+cd packaging/rpm
+./build_rpm.sh --system-mode --repo /tmp/repo --test
+
+# Install and configure system services
+sudo dnf install python3-rancher-helm-exporter
+sudo systemctl enable rancher-helm-exporter.timer
 ```
 
 ### Air-gapped Installation
@@ -327,40 +362,58 @@ helm install my-app-test ./my-app-test          # Test version
 
 ## Service Deployment (Linux/Systemd)
 
-For production environments, run rancher-helm-exporter as a systemd service:
+### User-Space Services (No Sudo)
 
-### Service Setup
+**Recommended for developers** - run services in your user session:
 
 ```bash
-# Set up systemd services
+# Set up user systemd services (after user-space installation)
+./scripts/systemd/user-service-setup.sh
+
+# Configure kubectl access (use your existing ~/.kube/config)
+kubectl config use-context <your-context>
+
+# Start services
+systemctl --user start rancher-helm-exporter.service
+systemctl --user enable rancher-helm-exporter.timer
+
+# App-specific exports
+cp ~/.config/rancher-helm-exporter/myapp.yaml ~/.config/rancher-helm-exporter/webapp.yaml
+systemctl --user start rancher-helm-exporter@webapp.service
+
+# Monitor exports
+journalctl --user -u rancher-helm-exporter.service -f
+```
+
+**User-space configuration locations:**
+- **User config**: `~/.config/rancher-helm-exporter/config.yaml`
+- **App configs**: `~/.config/rancher-helm-exporter/<app>.yaml`
+- **Data directory**: `~/.local/share/rancher-helm-exporter/`
+- **Exports**: `~/.local/share/rancher-helm-exporter/exports/`
+- **Logs**: `~/.local/share/rancher-helm-exporter/logs/`
+
+### System-Wide Services (Requires Sudo)
+
+For production environments, run rancher-helm-exporter as a system service:
+
+```bash
+# Set up system systemd services (requires system-wide installation)
 sudo ./scripts/systemd/setup_systemd.sh
 
 # Configure kubectl access for service user
 sudo cp ~/.kube/config /etc/rancher-helm-exporter/kubeconfig
 sudo chown root:rancher-exporter /etc/rancher-helm-exporter/kubeconfig
 sudo chmod 640 /etc/rancher-helm-exporter/kubeconfig
-```
 
-### Service Usage
-
-```bash
-# One-time export
+# Start services
 sudo systemctl start rancher-helm-exporter.service
-
-# Scheduled daily exports
 sudo systemctl enable rancher-helm-exporter.timer
-sudo systemctl start rancher-helm-exporter.timer
-
-# App-specific exports
-sudo cp /etc/rancher-helm-exporter/myapp.yaml /etc/rancher-helm-exporter/webapp.yaml
-sudo systemctl start rancher-helm-exporter@webapp.service
 
 # Monitor exports
 journalctl -u rancher-helm-exporter.service -f
 ```
 
-### Configuration Locations
-
+**System-wide configuration locations:**
 - **Global config**: `/etc/rancher-helm-exporter/config.yaml`
 - **App configs**: `/etc/rancher-helm-exporter/<app>.yaml`
 - **Kubeconfig**: `/etc/rancher-helm-exporter/kubeconfig`
@@ -371,15 +424,20 @@ journalctl -u rancher-helm-exporter.service -f
 ### Shell Integration
 
 ```bash
-# Bash completion (auto-installed)
+# Bash completion (auto-installed with all installation methods)
 rancher-helm-exporter <TAB><TAB>
 
-# Command aliases
+# Recommended aliases (add to ~/.bashrc)
 alias rhe='rancher-helm-exporter'
 alias helm-export='rancher-helm-exporter'
 
 # Quick exports
 rhe my-app --namespace production --create-test-chart
+
+# User-space service management shortcuts
+alias rhe-start='systemctl --user start rancher-helm-exporter.service'
+alias rhe-logs='journalctl --user -u rancher-helm-exporter.service -f'
+alias rhe-status='systemctl --user status rancher-helm-exporter.service'
 ```
 
 ## Limitations & Next Steps

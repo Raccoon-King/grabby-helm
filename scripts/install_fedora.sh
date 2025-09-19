@@ -39,7 +39,8 @@ check_requirements() {
     # Check for Python 3.9+
     if ! command -v python3 &> /dev/null; then
         print_error "Python 3 is required but not installed"
-        print_status "Install with: sudo dnf install python3 python3-pip python3-venv"
+        print_status "Ask your system administrator to install: python3 python3-pip python3-venv"
+        print_status "Or try installing via conda/miniconda in user space"
         exit 1
     fi
     
@@ -53,7 +54,9 @@ check_requirements() {
     # Check for kubectl
     if ! command -v kubectl &> /dev/null; then
         print_warning "kubectl not found - required for operation"
-        print_status "Install kubectl: https://kubernetes.io/docs/tasks/tools/install-kubectl-linux/"
+        print_status "User-space install: curl -LO https://dl.k8s.io/release/\$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+        print_status "Then: chmod +x kubectl && mv kubectl ~/.local/bin/"
+        print_status "Make sure ~/.local/bin is in your PATH"
     else
         KUBECTL_VERSION=$(kubectl version --client --short 2>/dev/null | cut -d' ' -f3 || echo "unknown")
         print_success "kubectl found: $KUBECTL_VERSION"
@@ -62,10 +65,36 @@ check_requirements() {
     # Check for helm (optional)
     if ! command -v helm &> /dev/null; then
         print_warning "helm not found - optional for chart linting"
-        print_status "Install helm: https://helm.sh/docs/intro/install/"
+        print_status "User-space install: curl https://get.helm.sh/helm-v3.12.0-linux-amd64.tar.gz | tar -xzO linux-amd64/helm > ~/.local/bin/helm"
+        print_status "Then: chmod +x ~/.local/bin/helm"
     else
         HELM_VERSION=$(helm version --short 2>/dev/null | cut -d'+' -f1 || echo "unknown")
         print_success "helm found: $HELM_VERSION"
+    fi
+}
+
+install_user_dependencies() {
+    print_status "Installing user-space dependencies..."
+    
+    # Ensure ~/.local/bin exists and is in PATH
+    mkdir -p "$BIN_DIR"
+    
+    # Install kubectl if not present
+    if ! command -v kubectl &> /dev/null; then
+        print_status "Installing kubectl to user space..."
+        curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+        chmod +x kubectl
+        mv kubectl "$BIN_DIR/"
+        print_success "kubectl installed to $BIN_DIR/kubectl"
+    fi
+    
+    # Install helm if not present
+    if ! command -v helm &> /dev/null; then
+        print_status "Installing helm to user space..."
+        HELM_VERSION="v3.12.0"
+        curl -fsSL "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz" | tar -xzO linux-amd64/helm > "$BIN_DIR/helm"
+        chmod +x "$BIN_DIR/helm"
+        print_success "helm installed to $BIN_DIR/helm"
     fi
 }
 
@@ -78,24 +107,25 @@ install_system_dependencies() {
     elif command -v sudo &> /dev/null; then
         SUDO="sudo"
     else
-        print_error "This script requires sudo access or root privileges"
-        exit 1
+        print_warning "No sudo access available - skipping system package installation"
+        print_status "Ask your system administrator to install: python3 python3-pip python3-venv git curl"
+        return 0
     fi
     
     # Install required packages
     $SUDO dnf install -y python3 python3-pip python3-venv git curl
     
-    # Install kubectl if not present
+    # Install kubectl if not present and we have sudo
     if ! command -v kubectl &> /dev/null; then
-        print_status "Installing kubectl..."
+        print_status "Installing kubectl system-wide..."
         curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
         chmod +x kubectl
         $SUDO mv kubectl /usr/local/bin/
     fi
     
-    # Install helm if not present
+    # Install helm if not present and we have sudo
     if ! command -v helm &> /dev/null; then
-        print_status "Installing helm..."
+        print_status "Installing helm system-wide..."
         curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
         chmod 700 get_helm.sh
         ./get_helm.sh
@@ -106,15 +136,19 @@ install_system_dependencies() {
 setup_directories() {
     print_status "Setting up directories..."
     
-    # Create config directories
+    # Create user config directories
     mkdir -p "$CONFIG_DIR"
     mkdir -p "$BIN_DIR"
     mkdir -p "$(dirname "$VENV_DIR")"
     
-    # Create global config directory if we have permission
-    if [[ $EUID -eq 0 ]] || [[ -w /etc ]]; then
-        mkdir -p "$GLOBAL_CONFIG_DIR"
-        print_success "Created global config directory: $GLOBAL_CONFIG_DIR"
+    # Create global config directory if we have permission (but don't require it)
+    if [[ $EUID -eq 0 ]] || [[ -w /etc ]] 2>/dev/null; then
+        mkdir -p "$GLOBAL_CONFIG_DIR" 2>/dev/null && \
+        print_success "Created global config directory: $GLOBAL_CONFIG_DIR" || \
+        print_warning "Could not create global config directory (no sudo access)"
+    else
+        print_warning "No write access to /etc - using user config only"
+        print_status "Global config would be at: $GLOBAL_CONFIG_DIR"
     fi
     
     print_success "Created user directories"
@@ -335,12 +369,17 @@ main() {
     
     # Parse command line arguments
     INSTALL_DEPS=false
+    INSTALL_USER_DEPS=false
     SKIP_COMPLETION=false
     
     while [[ $# -gt 0 ]]; do
         case $1 in
             --install-deps)
                 INSTALL_DEPS=true
+                shift
+                ;;
+            --install-user-deps)
+                INSTALL_USER_DEPS=true
                 shift
                 ;;
             --skip-completion)
@@ -351,9 +390,15 @@ main() {
                 echo "Usage: $0 [OPTIONS]"
                 echo ""
                 echo "Options:"
-                echo "  --install-deps     Install system dependencies (requires sudo)"
-                echo "  --skip-completion  Skip bash completion setup"
-                echo "  --help, -h         Show this help message"
+                echo "  --install-deps      Install system dependencies (requires sudo)"
+                echo "  --install-user-deps Install kubectl/helm to user space (no sudo)"
+                echo "  --skip-completion   Skip bash completion setup"
+                echo "  --help, -h          Show this help message"
+                echo ""
+                echo "Examples:"
+                echo "  $0                        # Basic install (no deps)"
+                echo "  $0 --install-user-deps    # Install with user-space tools"
+                echo "  $0 --install-deps         # Install with system deps (sudo)"
                 echo ""
                 exit 0
                 ;;
@@ -368,6 +413,8 @@ main() {
     
     if [[ "$INSTALL_DEPS" == "true" ]]; then
         install_system_dependencies
+    elif [[ "$INSTALL_USER_DEPS" == "true" ]]; then
+        install_user_dependencies
     fi
     
     setup_directories
