@@ -1,0 +1,37 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-production-app
+  labels:
+    app: my-production-app
+spec:
+  replicas: {{ .Values.replicaCount | default 1 }}
+  selector:
+    matchLabels:
+      app: my-production-app
+  template:
+    metadata:
+      labels:
+        app: my-production-app
+    spec:
+      containers:
+      - name: nginx
+        image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        ports:
+        - containerPort: {{ .Values.containerPort }}
+        resources: {{ toYaml .Values.resources | nindent 10 }}
+        volumeMounts:
+        - name: app-config
+          mountPath: /etc/nginx/nginx.conf
+          subPath: nginx.conf
+        - name: data-storage
+          mountPath: /data
+      volumes:
+      - name: app-config
+        configMap:
+          name: app-config
+      - name: data-storage
+        persistentVolumeClaim:
+          claimName: data-storage

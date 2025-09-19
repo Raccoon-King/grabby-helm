@@ -1,0 +1,18 @@
+{{- if .Values.persistence_data_storage.enabled }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: data-storage
+  labels:
+    app: my-production-app
+spec:
+  accessModes:
+    - {{ .Values.persistence_data_storage.accessMode }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence_data_storage.size }}
+  {{- if .Values.persistence_data_storage.storageClass }}
+  storageClassName: {{ .Values.persistence_data_storage.storageClass }}
+  {{- end }}
+{{- end }}

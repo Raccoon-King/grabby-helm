@@ -1,0 +1,11 @@
+{{- if .Values.config_app_config.enabled }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+  labels:
+    app: my-production-app
+data:
+{{ toYaml .Values.config_app_config.data | indent 2 }}
+{{- end }}
