@@ -991,7 +991,7 @@ def retry_operation(operation_func, operation_name: str, max_retries: int = 3) -
             print("Retrying...")
 
 
-def validate_prerequisites() -> bool:
+def validate_prerequisites(skip_cluster_check: bool = False) -> bool:
     """Validate that required tools are available."""
     print("🔍 Validating prerequisites...")
 
@@ -1008,20 +1008,23 @@ def validate_prerequisites() -> bool:
     except subprocess.CalledProcessError:
         print("⚠️  kubectl found but may have issues")
 
-    # Check cluster connectivity
-    try:
-        result = subprocess.run(["kubectl", "cluster-info"],
-                              capture_output=True, text=True, check=True, timeout=10)
-        print("✅ Kubernetes cluster is accessible")
-    except subprocess.TimeoutExpired:
-        print("⚠️  Kubernetes cluster connection timeout")
-        print("   This may indicate network issues or slow cluster")
-    except subprocess.CalledProcessError as e:
-        print("❌ Cannot connect to Kubernetes cluster")
-        handle_kubectl_error(e, "Cluster connectivity check")
-        return False
-    except FileNotFoundError:
-        pass  # kubectl already reported as missing
+    # Check cluster connectivity (unless skipped)
+    if not skip_cluster_check:
+        try:
+            result = subprocess.run(["kubectl", "cluster-info"],
+                                  capture_output=True, text=True, check=True, timeout=10)
+            print("✅ Kubernetes cluster is accessible")
+        except subprocess.TimeoutExpired:
+            print("⚠️  Kubernetes cluster connection timeout")
+            print("   This may indicate network issues or slow cluster")
+        except subprocess.CalledProcessError as e:
+            print("❌ Cannot connect to Kubernetes cluster")
+            handle_kubectl_error(e, "Cluster connectivity check")
+            return False
+        except FileNotFoundError:
+            pass  # kubectl already reported as missing
+    else:
+        print("⚠️  Cluster connectivity check skipped")
 
     # Check helm (optional)
     try:
@@ -2306,6 +2309,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         metavar="SELECTOR",
         help="Export all deployments matching the label selector (e.g., 'app=frontend')",
     )
+    parser.add_argument(
+        "--skip-cluster-check",
+        action="store_true",
+        help="Skip cluster connectivity validation (useful for testing or when cluster is temporarily unavailable)",
+    )
 
     args = parser.parse_args(argv)
 
@@ -2320,11 +2328,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     return args
 
 
-def run_chart_creation_workflow() -> None:
+def run_chart_creation_workflow(skip_cluster_check: bool = False) -> None:
     """Run the chart creation workflow with option for multiple charts."""
     # Validate prerequisites first
-    if not validate_prerequisites():
+    if not validate_prerequisites(skip_cluster_check):
         print("\n❌ Prerequisites not met. Please install missing tools and try again.")
+        print("💡 Use --skip-cluster-check to bypass cluster connectivity validation.")
         return
 
     charts_created = []
@@ -2441,7 +2450,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     # If no release name provided or config-prompt flag is used, run interactive workflow
     if not args.release or args.config_prompt:
         try:
-            run_chart_creation_workflow()
+            run_chart_creation_workflow(args.skip_cluster_check)
             return
 
         except KeyboardInterrupt:
