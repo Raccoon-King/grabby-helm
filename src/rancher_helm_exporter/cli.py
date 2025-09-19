@@ -1072,7 +1072,211 @@ def retry_operation(operation_func, operation_name: str, max_retries: int = 3) -
             print("Retrying...")
 
 
-def validate_prerequisites(skip_cluster_check: bool = False) -> bool:
+def detect_kubernetes_access_scope() -> Dict[str, Any]:
+    """Detect the user's Kubernetes access scope and capabilities."""
+    access_info = {
+        "cluster_access": False,
+        "namespace_access": {},
+        "default_namespace": "default",
+        "available_namespaces": [],
+        "recommended_mode": "namespace-only"
+    }
+
+    print("🔍 Detecting Kubernetes access scope...")
+
+    # Test 1: Try cluster-level access
+    try:
+        result = subprocess.run(["kubectl", "cluster-info"],
+                              capture_output=True, text=True, check=True, timeout=5)
+        access_info["cluster_access"] = True
+        print("✅ Cluster-level access detected")
+    except:
+        print("📝 No cluster-level access (restricted environment)")
+
+    # Test 2: Try to list namespaces
+    try:
+        result = subprocess.run(["kubectl", "get", "namespaces", "--no-headers"],
+                              capture_output=True, text=True, check=True, timeout=5)
+        namespaces = [line.split()[0] for line in result.stdout.split('\n') if line.strip()]
+        access_info["available_namespaces"] = namespaces
+        print(f"✅ Can list namespaces: {len(namespaces)} found")
+        if namespaces:
+            access_info["recommended_mode"] = "multi-namespace"
+    except:
+        print("📝 Cannot list namespaces (namespace-scoped access)")
+
+    # Test 3: Check current context default namespace
+    try:
+        result = subprocess.run(["kubectl", "config", "view", "--minify", "-o",
+                               "jsonpath={.contexts[0].context.namespace}"],
+                              capture_output=True, text=True, check=True)
+        if result.stdout.strip():
+            access_info["default_namespace"] = result.stdout.strip()
+            print(f"📍 Default namespace from context: {access_info['default_namespace']}")
+    except:
+        pass
+
+    # Test 4: Test namespace access for common namespaces
+    test_namespaces = [access_info["default_namespace"], "default", "kube-system"]
+    for ns in test_namespaces:
+        try:
+            result = subprocess.run(["kubectl", "get", "deployments", "-n", ns, "--no-headers"],
+                                  capture_output=True, text=True, check=True, timeout=5)
+            lines = [line for line in result.stdout.split('\n') if line.strip()]
+            access_info["namespace_access"][ns] = {
+                "accessible": True,
+                "deployment_count": len(lines)
+            }
+            print(f"✅ Namespace '{ns}': {len(lines)} deployment(s)")
+        except subprocess.CalledProcessError as e:
+            stderr = e.stderr or ""
+            if "forbidden" in stderr.lower():
+                access_info["namespace_access"][ns] = {"accessible": False, "reason": "forbidden"}
+                print(f"🔒 Namespace '{ns}': Access denied")
+            elif "not found" in stderr.lower():
+                access_info["namespace_access"][ns] = {"accessible": False, "reason": "not_found"}
+                print(f"❓ Namespace '{ns}': Not found")
+        except:
+            access_info["namespace_access"][ns] = {"accessible": False, "reason": "unknown"}
+
+    return access_info
+
+
+def prompt_for_access_scope(access_info: Dict[str, Any]) -> Dict[str, Any]:
+    """Interactive prompt to select access scope and target namespace."""
+    print(f"\n🎯 Kubernetes Access Configuration")
+    print("=" * 50)
+
+    # Show detected capabilities
+    print("📋 Detected capabilities:")
+    if access_info["cluster_access"]:
+        print("  ✅ Cluster-level access (can run cluster-info)")
+    else:
+        print("  📝 Namespace-scoped access (no cluster-level permissions)")
+
+    if access_info["available_namespaces"]:
+        print(f"  ✅ Can list namespaces ({len(access_info['available_namespaces'])} available)")
+    else:
+        print("  📝 Cannot list namespaces (restricted to specific namespaces)")
+
+    # Show accessible namespaces
+    accessible_ns = {ns: info for ns, info in access_info["namespace_access"].items()
+                    if info.get("accessible", False)}
+
+    if accessible_ns:
+        print(f"\n📦 Accessible namespaces with deployments:")
+        for ns, info in accessible_ns.items():
+            count = info.get("deployment_count", 0)
+            print(f"  • {ns}: {count} deployment(s)")
+    else:
+        print(f"\n⚠️  No accessible namespaces detected with the test")
+
+    # Determine options based on access level
+    options = []
+
+    if access_info["available_namespaces"]:
+        options.append(("multi", f"Browse all available namespaces ({len(access_info['available_namespaces'])} found)"))
+
+    if accessible_ns:
+        if len(accessible_ns) == 1:
+            ns_name = list(accessible_ns.keys())[0]
+            options.append(("single", f"Use accessible namespace: {ns_name}"))
+        else:
+            options.append(("select", f"Select from accessible namespaces ({len(accessible_ns)} found)"))
+
+    options.append(("specify", "Specify a namespace manually"))
+
+    if not options:
+        # Fallback if we can't detect anything
+        options.append(("manual", "Manual configuration (specify namespace)"))
+
+    print(f"\n🎯 Access mode options:")
+    for i, (mode, description) in enumerate(options, 1):
+        print(f"  {i}. {description}")
+
+    # Get user choice
+    while True:
+        try:
+            choice = input(f"\nSelect option [1-{len(options)}]: ").strip()
+            idx = int(choice) - 1
+            if 0 <= idx < len(options):
+                mode, _ = options[idx]
+                break
+            else:
+                print(f"Invalid choice. Please enter 1-{len(options)}")
+        except ValueError:
+            print("Invalid input. Please enter a number.")
+        except (KeyboardInterrupt, EOFError):
+            print("\nConfiguration cancelled.")
+            return {}
+
+    # Handle the selected mode
+    selected_config = {"mode": mode}
+
+    if mode == "multi":
+        # Let user browse all namespaces
+        print(f"\n📋 Available namespaces:")
+        for i, ns in enumerate(access_info["available_namespaces"], 1):
+            print(f"  {i}. {ns}")
+
+        while True:
+            try:
+                ns_choice = input(f"\nSelect namespace [1-{len(access_info['available_namespaces'])}]: ").strip()
+                ns_idx = int(ns_choice) - 1
+                if 0 <= ns_idx < len(access_info["available_namespaces"]):
+                    selected_config["namespace"] = access_info["available_namespaces"][ns_idx]
+                    break
+                else:
+                    print(f"Invalid choice. Please enter 1-{len(access_info['available_namespaces'])}")
+            except ValueError:
+                print("Invalid input. Please enter a number.")
+            except (KeyboardInterrupt, EOFError):
+                return {}
+
+    elif mode == "single":
+        # Use the single accessible namespace
+        selected_config["namespace"] = list(accessible_ns.keys())[0]
+
+    elif mode == "select":
+        # Let user select from accessible namespaces
+        accessible_list = list(accessible_ns.keys())
+        print(f"\n📦 Select from accessible namespaces:")
+        for i, ns in enumerate(accessible_list, 1):
+            count = accessible_ns[ns].get("deployment_count", 0)
+            print(f"  {i}. {ns} ({count} deployments)")
+
+        while True:
+            try:
+                ns_choice = input(f"\nSelect namespace [1-{len(accessible_list)}]: ").strip()
+                ns_idx = int(ns_choice) - 1
+                if 0 <= ns_idx < len(accessible_list):
+                    selected_config["namespace"] = accessible_list[ns_idx]
+                    break
+                else:
+                    print(f"Invalid choice. Please enter 1-{len(accessible_list)}")
+            except ValueError:
+                print("Invalid input. Please enter a number.")
+            except (KeyboardInterrupt, EOFError):
+                return {}
+
+    elif mode in ["specify", "manual"]:
+        # Manual namespace entry
+        default_ns = access_info["default_namespace"]
+        namespace = input(f"Enter namespace name [{default_ns}]: ").strip()
+        selected_config["namespace"] = namespace if namespace else default_ns
+
+    # Determine if we need cluster-level validation
+    selected_config["skip_cluster_check"] = not access_info["cluster_access"]
+    selected_config["namespace_only"] = not access_info["cluster_access"]
+
+    print(f"\n✅ Configuration selected:")
+    print(f"  📍 Target namespace: {selected_config['namespace']}")
+    print(f"  🔒 Mode: {'Namespace-only' if selected_config['namespace_only'] else 'Cluster-aware'}")
+
+    return selected_config
+
+
+def validate_prerequisites(skip_cluster_check: bool = False, namespace: str = "default") -> bool:
     """Validate that required tools are available."""
     print("🔍 Validating prerequisites...")
 
@@ -1089,23 +1293,44 @@ def validate_prerequisites(skip_cluster_check: bool = False) -> bool:
     except subprocess.CalledProcessError:
         print("⚠️  kubectl found but may have issues")
 
-    # Check cluster connectivity (unless skipped)
+    # Check namespace access (more reliable than cluster-info for restricted environments)
     if not skip_cluster_check:
         try:
-            result = subprocess.run(["kubectl", "cluster-info"],
+            # Try namespace-scoped access first (works with restricted permissions)
+            result = subprocess.run(["kubectl", "get", "deployments", "-n", namespace, "--no-headers"],
                                   capture_output=True, text=True, check=True, timeout=10)
-            print("✅ Kubernetes cluster is accessible")
-        except subprocess.TimeoutExpired:
-            print("⚠️  Kubernetes cluster connection timeout")
-            print("   This may indicate network issues or slow cluster")
+            print(f"✅ Kubernetes namespace '{namespace}' is accessible")
+
+            # Count deployments
+            lines = [line for line in result.stdout.split('\n') if line.strip()]
+            print(f"📦 Found {len(lines)} deployment(s) in namespace '{namespace}'")
+
         except subprocess.CalledProcessError as e:
-            print("❌ Cannot connect to Kubernetes cluster")
-            handle_kubectl_error(e, "Cluster connectivity check")
+            print(f"❌ Cannot access namespace '{namespace}'")
+
+            # Try to give helpful error messages
+            stderr = e.stderr or ""
+            if "forbidden" in stderr.lower():
+                print("🔒 Permission issue:")
+                print(f"  • Check if you have access to namespace '{namespace}'")
+                print(f"  • Try: kubectl auth can-i get deployments -n {namespace}")
+                print(f"  • Contact your cluster administrator for namespace access")
+            elif "not found" in stderr.lower():
+                print("🔍 Namespace not found:")
+                print(f"  • Check if namespace '{namespace}' exists")
+                print(f"  • Try: kubectl get namespaces (if you have permission)")
+                print(f"  • Or specify a different namespace with --namespace")
+            else:
+                handle_kubectl_error(e, f"Namespace '{namespace}' access check")
+
             return False
+        except subprocess.TimeoutExpired:
+            print(f"⚠️  Kubernetes namespace '{namespace}' connection timeout")
+            print("   This may indicate network issues or slow cluster")
         except FileNotFoundError:
             pass  # kubectl already reported as missing
     else:
-        print("⚠️  Cluster connectivity check skipped")
+        print("⚠️  Namespace connectivity check skipped")
 
     # Check helm (optional)
     try:
@@ -2656,6 +2881,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="Show detailed debugging information about retrieved cluster data",
     )
+    parser.add_argument(
+        "--namespace-only",
+        action="store_true",
+        help="Use namespace-only mode (for environments with restricted cluster access)",
+    )
 
     args = parser.parse_args(argv)
 
@@ -2670,12 +2900,29 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     return args
 
 
-def run_chart_creation_workflow(skip_cluster_check: bool = False) -> None:
+def run_chart_creation_workflow(skip_cluster_check: bool = False, namespace: str = "default",
+                                auto_scope: bool = True) -> None:
     """Run the chart creation workflow with option for multiple charts."""
-    # Validate prerequisites first
-    if not validate_prerequisites(skip_cluster_check):
+
+    # Auto-detect access scope and prompt user for configuration
+    if auto_scope:
+        print("🔍 Starting Kubernetes access detection...")
+        access_info = detect_kubernetes_access_scope()
+        scope_config = prompt_for_access_scope(access_info)
+
+        if not scope_config:
+            print("Configuration cancelled.")
+            return
+
+        # Update parameters based on detected scope
+        namespace = scope_config.get("namespace", namespace)
+        skip_cluster_check = scope_config.get("skip_cluster_check", skip_cluster_check)
+
+    # Validate prerequisites
+    if not validate_prerequisites(skip_cluster_check, namespace):
         print("\n❌ Prerequisites not met. Please install missing tools and try again.")
-        print("💡 Use --skip-cluster-check to bypass cluster connectivity validation.")
+        print("💡 Use --skip-cluster-check to bypass namespace connectivity validation.")
+        print(f"💡 Use --namespace <name> to specify a different namespace than '{namespace}'.")
         return
 
     charts_created = []
@@ -2832,7 +3079,21 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     # If no release name provided or config-prompt flag is used, run interactive workflow
     if not args.release or args.config_prompt:
         try:
-            run_chart_creation_workflow(args.skip_cluster_check)
+            namespace = args.namespace or "default"
+            # Auto-enable skip cluster check for namespace-only mode
+            skip_check = args.skip_cluster_check or args.namespace_only
+
+            # Disable auto-scope if user explicitly specified namespace or namespace-only mode
+            auto_scope = not (args.namespace_only or args.namespace or args.skip_cluster_check)
+
+            if args.namespace_only:
+                print("🔒 Namespace-only mode enabled (cluster-level access not required)")
+                auto_scope = False
+            elif args.namespace:
+                print(f"📍 Using specified namespace: {namespace}")
+                auto_scope = False
+
+            run_chart_creation_workflow(skip_check, namespace, auto_scope)
             return
 
         except KeyboardInterrupt:
