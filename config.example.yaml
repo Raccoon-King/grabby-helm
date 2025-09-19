@@ -1,0 +1,49 @@
+# Example configuration file for rancher-helm-exporter
+# Copy this file to .rancher-helm-exporter.yaml or specify with --config
+
+# Supported resource types (can be customized)
+supported_resources:
+  - deployments
+  - statefulsets
+  - daemonsets
+  - cronjobs
+  - jobs
+  - services
+  - configmaps
+  - secrets
+  - serviceaccounts
+  - persistentvolumeclaims
+  - ingresses
+
+# Retry configuration for kubectl operations
+retry:
+  max_retries: 3
+  timeout_seconds: 30
+  backoff_base: 2.0
+  backoff_max: 60.0
+
+# Resource cleaning configuration
+cleaning:
+  # Additional metadata fields to remove (beyond the defaults)
+  additional_metadata_fields:
+    - "example.com/custom-timestamp"
+  
+  # Additional annotation patterns to remove
+  annotation_patterns_to_remove:
+    - "example.com/managed-*"
+  
+  # Additional label patterns to remove  
+  label_patterns_to_remove:
+    - "example.com/build-*"
+  
+  # Whether to remove namespace references (default: true)
+  remove_namespace_references: true
+
+# Feature flags
+enable_rich_progress: true
+enable_validation: true
+enable_templating: false
+
+# Progress tracking configuration
+progress_update_interval: 0.1  # seconds
+progress_log_interval: 10      # log every N items

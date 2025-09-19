@@ -1,0 +1,62 @@
+# Systemd service template for rancher-helm-exporter
+# This is a parameterized service for running scheduled exports
+#
+# Installation:
+#   sudo cp rancher-helm-exporter@.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#
+# Usage:
+#   sudo systemctl start rancher-helm-exporter@myapp.service
+#   sudo systemctl enable rancher-helm-exporter@myapp.service
+#
+# Configuration:
+#   Create /etc/rancher-helm-exporter/myapp.yaml with export configuration
+
+[Unit]
+Description=Rancher Helm Exporter for %i
+Documentation=https://github.com/your-org/rancher-helm-exporter
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=rancher-exporter
+Group=rancher-exporter
+
+# Working directory
+WorkingDirectory=/var/lib/rancher-helm-exporter
+
+# Environment
+Environment=HOME=/var/lib/rancher-helm-exporter
+Environment=XDG_CONFIG_HOME=/etc/rancher-helm-exporter
+Environment=KUBECONFIG=/etc/rancher-helm-exporter/kubeconfig
+
+# Command to run - %i is the instance name (e.g., myapp)
+ExecStart=/usr/local/bin/rancher-helm-exporter %i \
+          --config /etc/rancher-helm-exporter/%i.yaml \
+          --output-dir /var/lib/rancher-helm-exporter/exports/%i \
+          --force
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/rancher-helm-exporter/exports
+ReadOnlyPaths=/etc/rancher-helm-exporter
+
+# Resource limits
+MemoryMax=512M
+CPUQuota=50%
+
+# Restart policy
+Restart=on-failure
+RestartSec=30
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rancher-helm-exporter-%i
+
+[Install]
+WantedBy=multi-user.target

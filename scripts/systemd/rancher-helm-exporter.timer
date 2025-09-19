@@ -1,0 +1,30 @@
+# Systemd timer for scheduled rancher-helm-exporter runs
+# This timer can trigger regular exports for backup/versioning purposes
+#
+# Installation:
+#   sudo cp rancher-helm-exporter.timer /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable rancher-helm-exporter.timer
+#   sudo systemctl start rancher-helm-exporter.timer
+#
+# Configuration:
+#   Modify OnCalendar to set schedule (default: daily at 2 AM)
+
+[Unit]
+Description=Daily Rancher Helm Export Timer
+Documentation=https://github.com/your-org/rancher-helm-exporter
+Requires=rancher-helm-exporter.service
+
+[Timer]
+# Run daily at 2 AM
+OnCalendar=daily
+Persistent=true
+
+# Add some randomization to avoid clustering
+RandomizedDelaySec=1800
+
+# Run immediately if system was down during scheduled time
+Persistent=true
+
+[Install]
+WantedBy=timers.target

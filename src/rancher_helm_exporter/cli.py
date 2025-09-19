@@ -15,6 +15,15 @@ from typing import Dict, Iterable, List, MutableMapping, Optional, Sequence, Set
 
 from .interactive import build_interactive_plan
 
+# Import new improved modules
+try:
+    from .cli_improved import main as improved_main
+    from .config import ExportConfig, GlobalConfig, load_config_from_args
+    from .exporter import ExportOrchestrator
+    USE_IMPROVED = True
+except ImportError:
+    USE_IMPROVED = False
+
 # Ensure that PyYAML is available before importing it. The project intentionally avoids
 # wrapping imports in try/except blocks, so we rely on importlib to perform the check.
 _YAML_SPEC = importlib.util.find_spec("yaml")
@@ -453,6 +462,14 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
+    # Try using the improved architecture first
+    if USE_IMPROVED:
+        try:
+            return improved_main(argv)
+        except Exception as e:
+            logging.warning("Falling back to legacy implementation due to: %s", e)
+    
+    # Legacy implementation
     args = parse_args(argv)
     if args.interactive:
         preview_exporter = ChartExporter(args)
