@@ -282,21 +282,20 @@ def prompt_for_new_config() -> Dict[str, Any]:
 def print_welcome_banner():
     """Print the Grabby-Helm welcome banner."""
     banner = """
-╔══════════════════════════════════════════════════════════════════════════════╗
-║                                                                              ║
-║   ██████╗ ██████╗  █████╗ ██████╗ ██████╗ ██╗   ██╗      ██╗  ██╗███████╗   ║
-║  ██╔════╝ ██╔══██╗██╔══██╗██╔══██╗██╔══██╗╚██╗ ██╔╝      ██║  ██║██╔════╝   ║
-║  ██║  ███╗██████╔╝███████║██████╔╝██████╔╝ ╚████╔╝ █████╗███████║█████╗     ║
-║  ██║   ██║██╔══██╗██╔══██║██╔══██╗██╔══██╗  ╚██╔╝  ╚════╝██╔══██║██╔══╝     ║
-║  ╚██████╔╝██║  ██║██║  ██║██████╔╝██████╔╝   ██║         ██║  ██║███████╗   ║
-║   ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═════╝ ╚═════╝    ╚═╝         ╚═╝  ╚═╝╚══════╝   ║
-║                                                                              ║
-║                    🔧 Kubernetes to Helm Chart Exporter 🔧                  ║
-║                                                                              ║
-║                     Transform your K8s workloads into                       ║
-║                        reusable Helm charts instantly!                      ║
-║                                                                              ║
-╚══════════════════════════════════════════════════════════════════════════════╝
++==============================================================================+
+|                                                                              |
+|    ####  ####    #   #### #### #   #     #   # ##### #     #   #            |
+|   #     #   #   # #  #  # #  # #   #     #   # #     #     ## ##            |
+|   # ##  ####   #####  ### ####  ###  --- ##### ####  #     # # #            |
+|   #  #  # #    #   # #  # #  #   #       #   # #     #     #   #            |
+|    ###  #  #   #   # #### ####   #       #   # ##### ##### #   #            |
+|                                                                              |
+|                         Kubernetes to Helm Chart Exporter                   |
+|                                                                              |
+|                     Transform your K8s workloads into                       |
+|                        reusable Helm charts instantly!                      |
+|                                                                              |
++==============================================================================+
     """
     print(banner)
 
@@ -304,7 +303,7 @@ def print_welcome_banner():
 def run_interactive_config() -> Optional[Dict[str, Any]]:
     """Run the interactive configuration prompt."""
     print_welcome_banner()
-    print("\n🚀 Interactive Configuration")
+    print("\n>> Interactive Configuration")
     print("=" * 50)
 
     # Check for existing configs
@@ -752,14 +751,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
-    # Try using the improved architecture first
-    if USE_IMPROVED:
-        try:
-            return improved_main(argv)
-        except Exception as e:
-            logging.warning("Falling back to legacy implementation due to: %s", e)
-
-    # Legacy implementation
+    # Use legacy implementation with interactive config
+    # Note: Improved architecture disabled to support interactive config mode
     args = parse_args(argv)
 
     # If no release name provided or config-prompt flag is used, run interactive config
