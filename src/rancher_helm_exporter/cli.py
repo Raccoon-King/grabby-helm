@@ -300,6 +300,87 @@ def print_welcome_banner():
     print(banner)
 
 
+def debug_cluster_data(namespace: str = "default") -> None:
+    """Debug function to show raw cluster data."""
+    print(f"\n🔍 Debug: Cluster Data Analysis")
+    print("=" * 50)
+
+    # Test basic connectivity
+    print(f"Testing basic kubectl connectivity...")
+    try:
+        cmd = ["kubectl", "cluster-info"]
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=10)
+        print(f"✅ Cluster info successful")
+        print(f"📋 Cluster details:")
+        for line in result.stdout.split('\n')[:3]:  # First 3 lines
+            if line.strip():
+                print(f"  {line.strip()}")
+    except Exception as e:
+        print(f"❌ Cluster info failed: {e}")
+        return
+
+    # Test namespace access
+    print(f"\nTesting namespace access...")
+    try:
+        cmd = ["kubectl", "get", "namespaces"]
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        print(f"✅ Can list namespaces")
+        namespaces = [line.split()[0] for line in result.stdout.split('\n')[1:] if line.strip()]
+        print(f"📋 Available namespaces: {', '.join(namespaces[:5])}")
+        if namespace not in namespaces:
+            print(f"⚠️  Target namespace '{namespace}' not found!")
+    except Exception as e:
+        print(f"❌ Namespace access failed: {e}")
+
+    # Test deployment access
+    print(f"\nTesting deployment access in namespace '{namespace}'...")
+    try:
+        cmd = ["kubectl", "get", "deployments", "-n", namespace]
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        print(f"✅ Can list deployments")
+        lines = result.stdout.split('\n')[1:]  # Skip header
+        deployments = [line.split()[0] for line in lines if line.strip()]
+        print(f"📋 Found deployments: {', '.join(deployments) if deployments else 'None'}")
+    except Exception as e:
+        print(f"❌ Deployment access failed: {e}")
+        print(f"📋 Error details: {e.stderr if hasattr(e, 'stderr') else str(e)}")
+
+    # Test JSON output
+    print(f"\nTesting JSON data retrieval...")
+    try:
+        cmd = ["kubectl", "get", "deployments", "-n", namespace, "-o", "json"]
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        data = json.loads(result.stdout)
+        items = data.get("items", [])
+        print(f"✅ JSON retrieval successful")
+        print(f"📋 Found {len(items)} deployment(s) in JSON format")
+
+        if items:
+            # Show details of first deployment
+            first_deployment = items[0]
+            metadata = first_deployment.get("metadata", {})
+            spec = first_deployment.get("spec", {})
+            status = first_deployment.get("status", {})
+
+            print(f"\n📦 Sample deployment details:")
+            print(f"  Name: {metadata.get('name', 'unknown')}")
+            print(f"  Namespace: {metadata.get('namespace', 'unknown')}")
+            print(f"  Labels: {metadata.get('labels', {})}")
+            print(f"  Replicas: {spec.get('replicas', 0)}")
+            print(f"  Ready Replicas: {status.get('readyReplicas', 0)}")
+
+            # Check containers
+            containers = spec.get("template", {}).get("spec", {}).get("containers", [])
+            print(f"  Containers: {len(containers)}")
+            for i, container in enumerate(containers[:2]):  # First 2 containers
+                print(f"    {i+1}. {container.get('name', 'unnamed')}: {container.get('image', 'no-image')}")
+
+    except json.JSONDecodeError as e:
+        print(f"❌ JSON parsing failed: {e}")
+    except Exception as e:
+        print(f"❌ JSON retrieval failed: {e}")
+
+
 def list_available_deployments(namespace: str = "default") -> List[Dict[str, Any]]:
     """List available deployments in the specified namespace."""
     def _get_deployments():
@@ -1115,6 +1196,257 @@ def safe_file_operation(operation_func, operation_name: str, file_path: str = ""
         print("  • File system corruption")
         print("  • Path too long (Windows)")
         raise
+
+
+def generate_demo_deployments() -> List[Dict[str, Any]]:
+    """Generate sample deployment data for demo mode."""
+    return [
+        {
+            "name": "frontend-app",
+            "replicas": 3,
+            "ready_replicas": 3,
+            "namespace": "production",
+            "labels": {"app": "frontend", "tier": "web"},
+            "creation_time": "2024-01-15T10:30:00Z",
+            "images": ["nginx:1.21", "myapp/frontend:v2.1.0"]
+        },
+        {
+            "name": "api-service",
+            "replicas": 2,
+            "ready_replicas": 2,
+            "namespace": "production",
+            "labels": {"app": "api", "tier": "backend"},
+            "creation_time": "2024-01-15T10:25:00Z",
+            "images": ["myregistry/api:v3.2.1"]
+        },
+        {
+            "name": "worker-service",
+            "replicas": 1,
+            "ready_replicas": 0,
+            "namespace": "production",
+            "labels": {"app": "worker", "tier": "processing"},
+            "creation_time": "2024-01-15T09:45:00Z",
+            "images": ["redis:7-alpine", "myapp/worker:v1.5.0"]
+        },
+        {
+            "name": "notification-service",
+            "replicas": 5,
+            "ready_replicas": 3,
+            "namespace": "production",
+            "labels": {"app": "notifications", "tier": "messaging"},
+            "creation_time": "2024-01-15T11:00:00Z",
+            "images": ["myapp/notifications:v1.8.2"]
+        }
+    ]
+
+
+def create_demo_chart(deployment: Dict[str, Any], output_dir: str) -> None:
+    """Create a demo chart with sample data."""
+    chart_path = Path(output_dir)
+    chart_path.mkdir(parents=True, exist_ok=True)
+
+    # Create templates directory
+    templates_path = chart_path / "templates"
+    templates_path.mkdir(exist_ok=True)
+
+    deployment_name = deployment["name"]
+    image_parts = deployment["images"][0].split(":")
+    repository = image_parts[0]
+    tag = image_parts[1] if len(image_parts) > 1 else "latest"
+
+    # Generate Chart.yaml
+    chart_yaml = {
+        "apiVersion": "v2",
+        "name": deployment_name,
+        "description": f"Helm chart for {deployment_name} exported from Kubernetes",
+        "type": "application",
+        "version": "0.1.0",
+        "appVersion": tag
+    }
+
+    with open(chart_path / "Chart.yaml", 'w') as f:
+        yaml.dump(chart_yaml, f, default_flow_style=False)
+
+    # Generate values.yaml
+    values_yaml = {
+        "image": {
+            "repository": repository,
+            "tag": tag,
+            "pullPolicy": "IfNotPresent"
+        },
+        "replicaCount": deployment["replicas"],
+        "containerPort": 8080,
+        "service": {
+            "type": "ClusterIP",
+            "port": 80,
+            "targetPort": 8080
+        },
+        "resources": {
+            "limits": {
+                "cpu": "500m",
+                "memory": "512Mi"
+            },
+            "requests": {
+                "cpu": "250m",
+                "memory": "256Mi"
+            }
+        }
+    }
+
+    # Add demo config if it's a web service
+    if "frontend" in deployment_name or "api" in deployment_name:
+        values_yaml["config"] = {
+            "enabled": True,
+            "data": {
+                "app.properties": f"app.name={deployment_name}\napp.version={tag}\napp.environment=production"
+            }
+        }
+
+    with open(chart_path / "values.yaml", 'w') as f:
+        yaml.dump(values_yaml, f, default_flow_style=False)
+
+    # Generate deployment template
+    deployment_template = f"""---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {deployment_name}
+  labels:
+    app: {deployment_name}
+spec:
+  replicas: {{{{ .Values.replicaCount | default 1 }}}}
+  selector:
+    matchLabels:
+      app: {deployment_name}
+  template:
+    metadata:
+      labels:
+        app: {deployment_name}
+    spec:
+      containers:
+      - name: {deployment_name}
+        image: {{{{ .Values.image.repository }}}}:{{{{ .Values.image.tag }}}}
+        imagePullPolicy: {{{{ .Values.image.pullPolicy }}}}
+        ports:
+        - containerPort: {{{{ .Values.containerPort }}}}
+        resources: {{{{ toYaml .Values.resources | nindent 10 }}}}
+"""
+
+    with open(templates_path / f"deployment-{deployment_name}.yaml", 'w') as f:
+        f.write(deployment_template)
+
+    # Generate service template
+    service_template = f"""---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {deployment_name}
+  labels:
+    app: {deployment_name}
+spec:
+  type: {{{{ .Values.service.type }}}}
+  ports:
+  - port: {{{{ .Values.service.port }}}}
+    targetPort: {{{{ .Values.service.targetPort }}}}
+    protocol: TCP
+  selector:
+    app: {deployment_name}
+"""
+
+    with open(templates_path / f"service-{deployment_name}.yaml", 'w') as f:
+        f.write(service_template)
+
+    # Generate configmap template if config exists
+    if "config" in values_yaml:
+        configmap_template = f"""{{{{- if .Values.config.enabled }}}}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {deployment_name}-config
+  labels:
+    app: {deployment_name}
+data:
+{{{{ toYaml .Values.config.data | indent 2 }}}}
+{{{{- end }}}}
+"""
+        with open(templates_path / f"configmap-{deployment_name}.yaml", 'w') as f:
+            f.write(configmap_template)
+
+    print(f"  ✅ Demo chart created: {output_dir}")
+    print(f"     📁 Chart.yaml, values.yaml, and {len(list(templates_path.glob('*.yaml')))} templates")
+
+
+def run_demo_mode() -> None:
+    """Run demo mode with sample deployments."""
+    print("🎭 Demo Mode: Generating sample charts")
+    print("=" * 50)
+
+    deployments = generate_demo_deployments()
+
+    print(f"📦 Sample deployments available:")
+    display_deployments_menu(deployments)
+
+    print(f"\n🎯 Demo Options:")
+    print("  1. Create individual charts for each deployment")
+    print("  2. Interactive selection (test search/filter)")
+    print("  3. Bulk export demo")
+
+    while True:
+        choice = input("\nSelect option [1-3]: ").strip()
+
+        if choice == "1":
+            # Create all demo charts
+            base_dir = "./demo-charts"
+            Path(base_dir).mkdir(exist_ok=True)
+
+            for deployment in deployments:
+                deployment_name = deployment["name"]
+                output_dir = f"{base_dir}/{deployment_name}-chart"
+                print(f"\nCreating demo chart: {deployment_name}")
+                create_demo_chart(deployment, output_dir)
+
+            print(f"\n🎉 Created {len(deployments)} demo charts in {base_dir}/")
+            print(f"\n🔧 Test with Helm:")
+            for deployment in deployments:
+                chart_dir = f"{deployment['name']}-chart"
+                print(f"  helm template {deployment['name']} {base_dir}/{chart_dir}")
+            break
+
+        elif choice == "2":
+            # Interactive selection demo
+            print(f"\n🔍 Testing search and filter interface...")
+            selected = select_deployments_multi(deployments)
+
+            if selected:
+                base_dir = "./demo-charts"
+                Path(base_dir).mkdir(exist_ok=True)
+
+                for deployment in selected:
+                    output_dir = f"{base_dir}/{deployment['name']}-chart"
+                    create_demo_chart(deployment, output_dir)
+
+                print(f"\n✅ Created charts for {len(selected)} selected deployments")
+            break
+
+        elif choice == "3":
+            # Bulk demo
+            print(f"\n🚀 Bulk export demo...")
+            base_dir = "./demo-charts"
+            Path(base_dir).mkdir(exist_ok=True)
+
+            for i, deployment in enumerate(deployments, 1):
+                print(f"\n[{i}/{len(deployments)}] {deployment['name']}")
+                output_dir = f"{base_dir}/{deployment['name']}-chart"
+                create_demo_chart(deployment, output_dir)
+
+            print(f"\n📊 Bulk Demo Complete:")
+            print(f"✅ Success: {len(deployments)}")
+            print(f"❌ Failed: 0")
+            break
+
+        else:
+            print("Invalid choice. Please enter 1-3.")
 
 
 def get_deployment_status(deployment_data: Dict[str, Any]) -> str:
@@ -2314,6 +2646,16 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="Skip cluster connectivity validation (useful for testing or when cluster is temporarily unavailable)",
     )
+    parser.add_argument(
+        "--demo-mode",
+        action="store_true",
+        help="Generate demo charts with sample data (no cluster required)",
+    )
+    parser.add_argument(
+        "--debug-data",
+        action="store_true",
+        help="Show detailed debugging information about retrieved cluster data",
+    )
 
     args = parser.parse_args(argv)
 
@@ -2396,6 +2738,21 @@ def run_chart_creation_workflow(skip_cluster_check: bool = False) -> None:
 
             except Exception as e:
                 logging.error("Chart creation failed: %s", e)
+                print(f"\n🔍 Debug info for failed chart creation:")
+                print(f"  Chart name: {args.release}")
+                print(f"  Output directory: {args.output_dir}")
+                print(f"  Namespace: {args.namespace}")
+                print(f"  Selector: {args.selector}")
+
+                # Check if config has deployment data
+                selected_deployments = config.get('selected_deployments', [])
+                if selected_deployments:
+                    print(f"  Selected deployments: {len(selected_deployments)}")
+                    for dep in selected_deployments:
+                        print(f"    - {dep.get('name', 'unknown')}: {dep.get('images', [])}")
+                else:
+                    print(f"  ⚠️  No deployment data in config!")
+
                 if not handle_chart_creation_error(e, args.release):
                     break
 
@@ -2422,6 +2779,31 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     # Use legacy implementation with interactive config
     # Note: Improved architecture disabled to support interactive config mode
     args = parse_args(argv)
+
+    # Handle debug mode first
+    if args.debug_data:
+        try:
+            namespace = args.namespace or "default"
+            debug_cluster_data(namespace)
+            return
+        except KeyboardInterrupt:
+            print("\nDebug cancelled.")
+            return
+        except Exception as e:
+            logging.error("Debug failed: %s", e)
+            return
+
+    # Handle demo mode first
+    if args.demo_mode:
+        try:
+            run_demo_mode()
+            return
+        except KeyboardInterrupt:
+            print("\nDemo mode cancelled.")
+            return
+        except Exception as e:
+            logging.error("Demo mode failed: %s", e)
+            return
 
     # Handle bulk operations first
     if args.bulk_namespace:
