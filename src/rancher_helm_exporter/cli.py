@@ -10,11 +10,11 @@ import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, List, MutableMapping, Optional, Sequence, Set
+from typing import Dict, Iterable, List, MutableMapping, Optional, Sequence, Set, Any
 
 from .interactive import build_interactive_plan
-from .interactive_config import run_interactive_config, apply_config_to_namespace
 from .utils import StringUtils
 
 # Import new improved modules
@@ -39,6 +39,297 @@ if _YAML_SPEC.loader is None:  # pragma: no cover - safety check
 
 yaml = importlib.util.module_from_spec(_YAML_SPEC)
 _YAML_SPEC.loader.exec_module(yaml)
+
+
+# Config management functions
+def get_config_dir() -> Path:
+    """Get the configuration directory."""
+    config_dir = Path.home() / ".config" / "rancher-helm-exporter"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    return config_dir
+
+
+def save_config(name: str, config: Dict[str, Any]) -> None:
+    """Save a configuration with a given name."""
+    config_dir = get_config_dir()
+    configs_file = config_dir / "saved_configs.json"
+
+    # Load existing configs
+    configs = {}
+    if configs_file.exists():
+        try:
+            with configs_file.open('r', encoding='utf-8') as f:
+                configs = json.load(f)
+        except Exception:
+            configs = {}
+
+    # Add new config with metadata
+    config_with_meta = {
+        "config": config,
+        "saved_at": datetime.now().isoformat(),
+        "name": name
+    }
+
+    configs[name] = config_with_meta
+
+    # Save back to file
+    try:
+        with configs_file.open('w', encoding='utf-8') as f:
+            json.dump(configs, f, indent=2)
+        print(f"Configuration saved: {name}")
+    except Exception as e:
+        print(f"Failed to save config: {e}")
+
+
+def load_all_configs() -> Dict[str, Dict[str, Any]]:
+    """Load all saved configurations."""
+    config_dir = get_config_dir()
+    configs_file = config_dir / "saved_configs.json"
+
+    if not configs_file.exists():
+        return {}
+
+    try:
+        with configs_file.open('r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def list_config_names() -> List[str]:
+    """List all saved configuration names."""
+    configs = load_all_configs()
+    return sorted(configs.keys())
+
+
+def load_config(name: str) -> Optional[Dict[str, Any]]:
+    """Load a specific configuration by name."""
+    configs = load_all_configs()
+    config_entry = configs.get(name)
+    if config_entry:
+        return config_entry.get("config")
+    return None
+
+
+# Interactive prompting functions
+def prompt_required(prompt: str, default: Optional[str] = None) -> str:
+    """Prompt for a required value."""
+    while True:
+        if default:
+            value = input(f"{prompt} [{default}]: ").strip()
+            if not value:
+                value = default
+        else:
+            value = input(f"{prompt}: ").strip()
+
+        if value:
+            return value
+
+        print("This field is required. Please provide a value.")
+
+
+def prompt_optional(prompt: str, default: Optional[str] = None) -> Optional[str]:
+    """Prompt for an optional value."""
+    if default:
+        value = input(f"{prompt} [{default}]: ").strip()
+        return value if value else default
+    else:
+        value = input(f"{prompt} (optional): ").strip()
+        return value if value else None
+
+
+def prompt_yes_no(prompt: str, default: bool = False) -> bool:
+    """Prompt for a yes/no answer."""
+    default_str = "Y/n" if default else "y/N"
+    while True:
+        answer = input(f"{prompt} [{default_str}]: ").strip().lower()
+        if not answer:
+            return default
+        if answer in ('y', 'yes'):
+            return True
+        elif answer in ('n', 'no'):
+            return False
+        else:
+            print("Please answer 'y' or 'n'")
+
+
+def offer_existing_configs() -> Optional[Dict[str, Any]]:
+    """Offer to use existing configurations."""
+    configs = list_config_names()
+
+    if not configs:
+        return None
+
+    print("\nFound existing configurations:")
+    for i, config_name in enumerate(configs, 1):
+        print(f"  {i}. {config_name}")
+
+    print(f"  {len(configs) + 1}. Create new configuration")
+
+    while True:
+        try:
+            choice = input(f"\nSelect option [1-{len(configs) + 1}]: ").strip()
+            choice_num = int(choice)
+
+            if 1 <= choice_num <= len(configs):
+                # User selected existing config
+                selected_config = configs[choice_num - 1]
+                config = load_config(selected_config)
+                if config:
+                    print(f"\nUsing configuration: {selected_config}")
+                    display_config_summary(config)
+                    return config
+            elif choice_num == len(configs) + 1:
+                # User wants to create new config
+                return None
+            else:
+                print(f"Invalid choice. Please enter 1-{len(configs) + 1}")
+        except ValueError:
+            print("Please enter a valid number")
+
+    return None
+
+
+def display_config_summary(config: Dict[str, Any]) -> None:
+    """Display a summary of the configuration."""
+    print("\nConfiguration Summary:")
+    print("-" * 30)
+
+    key_fields = ['release', 'namespace', 'output_dir', 'selector']
+    for field in key_fields:
+        if field in config:
+            print(f"  {field}: {config[field]}")
+
+    flags = []
+    if config.get('include_secrets'):
+        flags.append("include secrets")
+    if config.get('create_test_chart'):
+        flags.append("create test chart")
+    if config.get('lint'):
+        flags.append("run lint")
+    if config.get('force'):
+        flags.append("force overwrite")
+
+    if flags:
+        print(f"  flags: {', '.join(flags)}")
+
+
+def prompt_for_new_config() -> Dict[str, Any]:
+    """Interactive prompt for configuration values."""
+    print("\nConfiguring new export...")
+    config = {}
+
+    # Required fields
+    config['release'] = prompt_required("Release name (Helm chart name)", "my-app")
+    config['namespace'] = prompt_optional("Kubernetes namespace", "default")
+
+    # Optional but common fields
+    config['output_dir'] = prompt_optional("Output directory", "./generated-chart")
+    config['selector'] = prompt_optional("Label selector (e.g., app=my-app)", None)
+
+    # Advanced options
+    if prompt_yes_no("Configure advanced options?", False):
+        # Kubectl options
+        kubeconfig = prompt_optional("Custom kubeconfig path", None)
+        if kubeconfig:
+            config['kubeconfig'] = kubeconfig
+
+        context = prompt_optional("Kubernetes context", None)
+        if context:
+            config['context'] = context
+
+        # Resource filtering
+        only_resources = prompt_optional("Only export these resource types (comma-separated)", None)
+        if only_resources:
+            config['only'] = [r.strip() for r in only_resources.split(',')]
+
+        exclude_resources = prompt_optional("Exclude these resource types (comma-separated)", None)
+        if exclude_resources:
+            config['exclude'] = [r.strip() for r in exclude_resources.split(',')]
+
+        # Chart metadata
+        chart_version = prompt_optional("Chart version", "0.1.0")
+        if chart_version:
+            config['chart_version'] = chart_version
+
+        app_version = prompt_optional("App version", "1.0.0")
+        if app_version:
+            config['app_version'] = app_version
+
+        # File prefix
+        prefix = prompt_optional("Filename prefix for manifests", None)
+        if prefix:
+            config['prefix'] = prefix
+
+    # Secret handling
+    if prompt_yes_no("Include secrets?", False):
+        config['include_secrets'] = True
+        if prompt_yes_no("Include service account secrets?", False):
+            config['include_service_account_secrets'] = True
+
+    # Test chart
+    if prompt_yes_no("Create test chart alongside main chart?", False):
+        config['create_test_chart'] = True
+        config['test_suffix'] = prompt_optional("Test suffix", "test")
+
+    # Validation and linting
+    config['lint'] = prompt_yes_no("Run helm lint after generation?", True)
+    config['force'] = prompt_yes_no("Overwrite output directory if it exists?", False)
+
+    return config
+
+
+def print_welcome_banner():
+    """Print the Grabby-Helm welcome banner."""
+    banner = """
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                                                                              ║
+║   ██████╗ ██████╗  █████╗ ██████╗ ██████╗ ██╗   ██╗      ██╗  ██╗███████╗   ║
+║  ██╔════╝ ██╔══██╗██╔══██╗██╔══██╗██╔══██╗╚██╗ ██╔╝      ██║  ██║██╔════╝   ║
+║  ██║  ███╗██████╔╝███████║██████╔╝██████╔╝ ╚████╔╝ █████╗███████║█████╗     ║
+║  ██║   ██║██╔══██╗██╔══██║██╔══██╗██╔══██╗  ╚██╔╝  ╚════╝██╔══██║██╔══╝     ║
+║  ╚██████╔╝██║  ██║██║  ██║██████╔╝██████╔╝   ██║         ██║  ██║███████╗   ║
+║   ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═════╝ ╚═════╝    ╚═╝         ╚═╝  ╚═╝╚══════╝   ║
+║                                                                              ║
+║                    🔧 Kubernetes to Helm Chart Exporter 🔧                  ║
+║                                                                              ║
+║                     Transform your K8s workloads into                       ║
+║                        reusable Helm charts instantly!                      ║
+║                                                                              ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+    """
+    print(banner)
+
+
+def run_interactive_config() -> Optional[Dict[str, Any]]:
+    """Run the interactive configuration prompt."""
+    print_welcome_banner()
+    print("\n🚀 Interactive Configuration")
+    print("=" * 50)
+
+    # Check for existing configs
+    existing_config = offer_existing_configs()
+    if existing_config:
+        return existing_config
+
+    # Prompt for new config
+    config = prompt_for_new_config()
+
+    # Save this config
+    if prompt_yes_no("Save this configuration for future use?", True):
+        config_name = prompt_required("Configuration name", f"config-{datetime.now().strftime('%Y%m%d-%H%M')}")
+        save_config(config_name, config)
+
+    return config
+
+
+def apply_config_to_args(args: argparse.Namespace, config: Dict[str, Any]) -> None:
+    """Apply configuration dictionary to an argparse namespace."""
+    for key, value in config.items():
+        if key == 'release':
+            args.release = value
+        elif hasattr(args, key):
+            setattr(args, key, value)
 
 
 @dataclass
@@ -476,7 +767,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         try:
             config = run_interactive_config()
             if config:
-                apply_config_to_namespace(args, config)
+                apply_config_to_args(args, config)
 
             # Ensure we have a release name after interactive config
             if not args.release:
