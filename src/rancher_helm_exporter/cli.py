@@ -12,19 +12,9 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, List, MutableMapping, Optional, Sequence, Set, Any
+from typing import Dict, List, Optional, Sequence, Any
 
-from .interactive import build_interactive_plan
-from .utils import StringUtils
-
-# Import new improved modules
-try:
-    from .cli_improved import main as improved_main
-    from .config import ExportConfig, GlobalConfig, load_config_from_args
-    from .exporter import ExportOrchestrator
-    USE_IMPROVED = True
-except ImportError:
-    USE_IMPROVED = False
+# PyYAML import handling
 
 # Ensure that PyYAML is available before importing it. The project intentionally avoids
 # wrapping imports in try/except blocks, so we rely on importlib to perform the check.
@@ -111,6 +101,52 @@ def load_config(name: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def delete_config(name: str) -> bool:
+    """Delete a saved configuration by name."""
+    config_dir = get_config_dir()
+    configs_file = config_dir / "saved_configs.json"
+
+    if not configs_file.exists():
+        return False
+
+    try:
+        # Load existing configs
+        with configs_file.open('r', encoding='utf-8') as f:
+            configs = json.load(f)
+
+        if name not in configs:
+            return False
+
+        # Remove the config
+        del configs[name]
+
+        # Save back to file
+        with configs_file.open('w', encoding='utf-8') as f:
+            json.dump(configs, f, indent=2)
+
+        print(f"Configuration deleted: {name}")
+        return True
+
+    except Exception as e:
+        print(f"Failed to delete config: {e}")
+        return False
+
+
+def delete_all_configs() -> bool:
+    """Delete all saved configurations."""
+    config_dir = get_config_dir()
+    configs_file = config_dir / "saved_configs.json"
+
+    try:
+        if configs_file.exists():
+            configs_file.unlink()
+            print("All configurations deleted.")
+        return True
+    except Exception as e:
+        print(f"Failed to delete all configs: {e}")
+        return False
+
+
 # Interactive prompting functions
 def prompt_required(prompt: str, default: Optional[str] = None) -> str:
     """Prompt for a required value."""
@@ -165,10 +201,11 @@ def offer_existing_configs() -> Optional[Dict[str, Any]]:
         print(f"  {i}. {config_name}")
 
     print(f"  {len(configs) + 1}. Create new configuration")
+    print(f"  {len(configs) + 2}. Manage configurations")
 
     while True:
         try:
-            choice = input(f"\nSelect option [1-{len(configs) + 1}]: ").strip()
+            choice = input(f"\nSelect option [1-{len(configs) + 2}]: ").strip()
             choice_num = int(choice)
 
             if 1 <= choice_num <= len(configs):
@@ -182,12 +219,190 @@ def offer_existing_configs() -> Optional[Dict[str, Any]]:
             elif choice_num == len(configs) + 1:
                 # User wants to create new config
                 return None
+            elif choice_num == len(configs) + 2:
+                # User wants to manage configs
+                if manage_configs_menu():
+                    # Refresh the configs list and restart the selection
+                    return offer_existing_configs()
+                else:
+                    # User cancelled config management, continue with selection
+                    continue
             else:
-                print(f"Invalid choice. Please enter 1-{len(configs) + 1}")
+                print(f"Invalid choice. Please enter 1-{len(configs) + 2}")
         except ValueError:
             print("Please enter a valid number")
 
     return None
+
+
+def manage_configs_menu() -> bool:
+    """Interactive menu for managing saved configurations. Returns True if changes were made."""
+    configs = list_config_names()
+
+    if not configs:
+        print("\nNo saved configurations found.")
+        return False
+
+    changes_made = False
+
+    while True:
+        # Refresh configs list in case of deletions
+        configs = list_config_names()
+
+        if not configs:
+            print("\nAll configurations have been deleted.")
+            return changes_made
+
+        print("\n" + "=" * 50)
+        print("             CONFIGURATION MANAGEMENT")
+        print("=" * 50)
+        print(f"\nFound {len(configs)} saved configuration(s):")
+
+        # Show configs with additional metadata
+        all_configs = load_all_configs()
+        for i, config_name in enumerate(configs, 1):
+            config_entry = all_configs.get(config_name, {})
+            saved_at = config_entry.get("saved_at", "Unknown")
+            if saved_at != "Unknown":
+                # Format the timestamp nicely
+                try:
+                    from datetime import datetime
+                    dt = datetime.fromisoformat(saved_at)
+                    saved_at = dt.strftime("%Y-%m-%d %H:%M")
+                except:
+                    pass
+
+            print(f"  {i}. {config_name} (saved: {saved_at})")
+
+        print(f"\n  v. View configuration details")
+        print(f"  d. Delete a configuration")
+        print(f"  D. Delete all configurations")
+        print(f"  q. Return to main menu")
+
+        choice = input(f"\nSelect option [1-{len(configs)}, v, d, D, q]: ").strip().lower()
+
+        if choice == 'q':
+            break
+        elif choice == 'v':
+            # View configuration details
+            view_config_details(configs)
+        elif choice == 'd':
+            # Delete a specific configuration
+            if delete_specific_config(configs):
+                changes_made = True
+        elif choice.upper() == 'D':
+            # Delete all configurations
+            if delete_all_configs_interactive():
+                changes_made = True
+        else:
+            try:
+                choice_num = int(choice)
+                if 1 <= choice_num <= len(configs):
+                    # Show details for selected config
+                    config_name = configs[choice_num - 1]
+                    config = load_config(config_name)
+                    if config:
+                        print(f"\nConfiguration: {config_name}")
+                        display_config_summary(config)
+
+                        # Offer actions on this specific config
+                        action = input("\n[d] Delete this config, [Enter] Continue: ").strip().lower()
+                        if action == 'd':
+                            if prompt_yes_no(f"Delete configuration '{config_name}'?", False):
+                                if delete_config(config_name):
+                                    changes_made = True
+                else:
+                    print(f"Invalid choice. Please enter 1-{len(configs)}, v, d, D, or q")
+            except ValueError:
+                print("Please enter a valid option")
+
+    return changes_made
+
+
+def view_config_details(configs: List[str]) -> None:
+    """Display detailed information about configurations."""
+    if not configs:
+        print("No configurations available.")
+        return
+
+    print("\nSelect configuration to view details:")
+    for i, config_name in enumerate(configs, 1):
+        print(f"  {i}. {config_name}")
+
+    try:
+        choice = input(f"\nEnter number [1-{len(configs)}] or [Enter] to cancel: ").strip()
+        if not choice:
+            return
+
+        choice_num = int(choice)
+        if 1 <= choice_num <= len(configs):
+            config_name = configs[choice_num - 1]
+            config = load_config(config_name)
+            if config:
+                print(f"\n{'='*60}")
+                print(f"Configuration Details: {config_name}")
+                print(f"{'='*60}")
+                display_config_summary(config)
+            else:
+                print(f"Failed to load configuration: {config_name}")
+        else:
+            print(f"Invalid choice. Please enter 1-{len(configs)}")
+    except ValueError:
+        print("Please enter a valid number")
+
+
+def delete_specific_config(configs: List[str]) -> bool:
+    """Delete a specific configuration. Returns True if a deletion occurred."""
+    if not configs:
+        print("No configurations available to delete.")
+        return False
+
+    print("\nSelect configuration to delete:")
+    for i, config_name in enumerate(configs, 1):
+        print(f"  {i}. {config_name}")
+
+    try:
+        choice = input(f"\nEnter number [1-{len(configs)}] or [Enter] to cancel: ").strip()
+        if not choice:
+            return False
+
+        choice_num = int(choice)
+        if 1 <= choice_num <= len(configs):
+            config_name = configs[choice_num - 1]
+
+            # Show config details before deletion
+            config = load_config(config_name)
+            if config:
+                print(f"\nConfiguration to delete: {config_name}")
+                display_config_summary(config)
+
+            if prompt_yes_no(f"\nAre you sure you want to delete '{config_name}'?", False):
+                return delete_config(config_name)
+        else:
+            print(f"Invalid choice. Please enter 1-{len(configs)}")
+    except ValueError:
+        print("Please enter a valid number")
+
+    return False
+
+
+def delete_all_configs_interactive() -> bool:
+    """Delete all configurations with confirmation. Returns True if deletion occurred."""
+    configs = list_config_names()
+
+    if not configs:
+        print("No configurations to delete.")
+        return False
+
+    print(f"\nThis will delete ALL {len(configs)} saved configurations:")
+    for config_name in configs:
+        print(f"  - {config_name}")
+
+    if prompt_yes_no(f"\nAre you sure you want to delete all {len(configs)} configurations?", False):
+        if prompt_yes_no("This action cannot be undone. Continue?", False):
+            return delete_all_configs()
+
+    return False
 
 
 def display_config_summary(config: Dict[str, Any]) -> None:
@@ -302,7 +517,7 @@ def print_welcome_banner():
 
 def debug_cluster_data(namespace: str = "default") -> None:
     """Debug function to show raw cluster data."""
-    print(f"\n🔍 Debug: Cluster Data Analysis")
+    print(f"\n>> Debug: Cluster Data Analysis")
     print("=" * 50)
 
     # Test basic connectivity
@@ -310,13 +525,13 @@ def debug_cluster_data(namespace: str = "default") -> None:
     try:
         cmd = ["kubectl", "cluster-info"]
         result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=10)
-        print(f"✅ Cluster info successful")
-        print(f"📋 Cluster details:")
+        print(f"[+] Cluster info successful")
+        print(f">> Cluster details:")
         for line in result.stdout.split('\n')[:3]:  # First 3 lines
             if line.strip():
                 print(f"  {line.strip()}")
     except Exception as e:
-        print(f"❌ Cluster info failed: {e}")
+        print(f"[-] Cluster info failed: {e}")
         return
 
     # Test namespace access
@@ -324,26 +539,26 @@ def debug_cluster_data(namespace: str = "default") -> None:
     try:
         cmd = ["kubectl", "get", "namespaces"]
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-        print(f"✅ Can list namespaces")
+        print(f"[+] Can list namespaces")
         namespaces = [line.split()[0] for line in result.stdout.split('\n')[1:] if line.strip()]
-        print(f"📋 Available namespaces: {', '.join(namespaces[:5])}")
+        print(f">> Available namespaces: {', '.join(namespaces[:5])}")
         if namespace not in namespaces:
-            print(f"⚠️  Target namespace '{namespace}' not found!")
+            print(f"[!]  Target namespace '{namespace}' not found!")
     except Exception as e:
-        print(f"❌ Namespace access failed: {e}")
+        print(f"[-] Namespace access failed: {e}")
 
     # Test deployment access
     print(f"\nTesting deployment access in namespace '{namespace}'...")
     try:
         cmd = ["kubectl", "get", "deployments", "-n", namespace]
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-        print(f"✅ Can list deployments")
+        print(f"[+] Can list deployments")
         lines = result.stdout.split('\n')[1:]  # Skip header
         deployments = [line.split()[0] for line in lines if line.strip()]
-        print(f"📋 Found deployments: {', '.join(deployments) if deployments else 'None'}")
+        print(f">> Found deployments: {', '.join(deployments) if deployments else 'None'}")
     except Exception as e:
-        print(f"❌ Deployment access failed: {e}")
-        print(f"📋 Error details: {e.stderr if hasattr(e, 'stderr') else str(e)}")
+        print(f"[-] Deployment access failed: {e}")
+        print(f">> Error details: {e.stderr if hasattr(e, 'stderr') else str(e)}")
 
     # Test JSON output
     print(f"\nTesting JSON data retrieval...")
@@ -352,8 +567,8 @@ def debug_cluster_data(namespace: str = "default") -> None:
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
         data = json.loads(result.stdout)
         items = data.get("items", [])
-        print(f"✅ JSON retrieval successful")
-        print(f"📋 Found {len(items)} deployment(s) in JSON format")
+        print(f"[+] JSON retrieval successful")
+        print(f">> Found {len(items)} deployment(s) in JSON format")
 
         if items:
             # Show details of first deployment
@@ -362,7 +577,7 @@ def debug_cluster_data(namespace: str = "default") -> None:
             spec = first_deployment.get("spec", {})
             status = first_deployment.get("status", {})
 
-            print(f"\n📦 Sample deployment details:")
+            print(f"\n[BOX] Sample deployment details:")
             print(f"  Name: {metadata.get('name', 'unknown')}")
             print(f"  Namespace: {metadata.get('namespace', 'unknown')}")
             print(f"  Labels: {metadata.get('labels', {})}")
@@ -376,9 +591,9 @@ def debug_cluster_data(namespace: str = "default") -> None:
                 print(f"    {i+1}. {container.get('name', 'unnamed')}: {container.get('image', 'no-image')}")
 
     except json.JSONDecodeError as e:
-        print(f"❌ JSON parsing failed: {e}")
+        print(f"[-] JSON parsing failed: {e}")
     except Exception as e:
-        print(f"❌ JSON retrieval failed: {e}")
+        print(f"[-] JSON retrieval failed: {e}")
 
 
 def list_available_deployments(namespace: str = "default") -> List[Dict[str, Any]]:
@@ -440,11 +655,11 @@ def filter_deployments(deployments: List[Dict[str, Any]], search_term: str = "",
     # Filter by status
     if status_filter:
         status_map = {
-            "ready": lambda d: get_deployment_status(d).startswith("✅"),
-            "failed": lambda d: get_deployment_status(d).startswith("❌"),
-            "issue": lambda d: get_deployment_status(d).startswith("⚠️"),
-            "scaling": lambda d: get_deployment_status(d).startswith("🔄"),
-            "stopped": lambda d: get_deployment_status(d).startswith("⚪")
+            "ready": lambda d: get_deployment_status(d).startswith("[+]"),
+            "failed": lambda d: get_deployment_status(d).startswith("[-]"),
+            "issue": lambda d: get_deployment_status(d).startswith("[!]"),
+            "scaling": lambda d: get_deployment_status(d).startswith("[CYCLE]"),
+            "stopped": lambda d: get_deployment_status(d).startswith("[CIRCLE]")
         }
         if status_filter.lower() in status_map:
             filtered = [d for d in filtered if status_map[status_filter.lower()](d)]
@@ -467,7 +682,7 @@ def filter_deployments(deployments: List[Dict[str, Any]], search_term: str = "",
 def preview_chart_creation(selected_deployments: List[Dict[str, Any]],
                           config: Dict[str, Any], namespace: str) -> bool:
     """Preview what will be created and validate before chart generation."""
-    print(f"\n📋 Chart Creation Preview")
+    print(f"\n>> Chart Creation Preview")
     print("=" * 50)
 
     if len(selected_deployments) == 1:
@@ -480,7 +695,7 @@ def preview_chart_creation(selected_deployments: List[Dict[str, Any]],
         print(f"Source Deployment: {deployment['name']} ({deployment['ready_replicas']}/{deployment['replicas']} replicas)")
 
         # Estimate resources to be included
-        print(f"\n📦 Resources to include:")
+        print(f"\n[BOX] Resources to include:")
         print(f"  ✓ 1 Deployment ({deployment['name']})")
 
         # Find related resources
@@ -501,13 +716,13 @@ def preview_chart_creation(selected_deployments: List[Dict[str, Any]],
         print(f"Output Directory: {output_dir}")
         print(f"Multi-Deployment Chart ({len(selected_deployments)} deployments)")
 
-        print(f"\n📦 Deployments to include:")
+        print(f"\n[BOX] Deployments to include:")
         total_replicas = 0
         for deployment in selected_deployments:
             print(f"  ✓ {deployment['name']} ({deployment['ready_replicas']}/{deployment['replicas']} replicas)")
             total_replicas += deployment['replicas']
 
-        print(f"\n📊 Summary:")
+        print(f"\n[CHART] Summary:")
         print(f"  • Total Deployments: {len(selected_deployments)}")
         print(f"  • Total Replicas: {total_replicas}")
 
@@ -522,7 +737,7 @@ def preview_chart_creation(selected_deployments: List[Dict[str, Any]],
             print(f"  • Total Resources: {total_resources}")
 
     # Chart structure preview
-    print(f"\n📁 Chart Structure:")
+    print(f"\n[DIR] Chart Structure:")
     print(f"  {output_dir}/")
     print(f"  ├── Chart.yaml")
     print(f"  ├── values.yaml")
@@ -541,41 +756,41 @@ def preview_chart_creation(selected_deployments: List[Dict[str, Any]],
                 print(f"      ├── {len(items)} {resource_type} template(s)")
 
     # Validation checks
-    print(f"\n🔍 Validation Checks:")
+    print(f"\n[SEARCH] Validation Checks:")
     validation_passed = True
 
     # Check if output directory exists
     output_path = Path(output_dir)
     if output_path.exists():
-        print(f"  ⚠️  Output directory exists (will be overwritten)")
+        print(f"  [!]  Output directory exists (will be overwritten)")
         if not config.get('force', False):
             validation_passed = False
     else:
-        print(f"  ✅ Output directory is available")
+        print(f"  [+] Output directory is available")
 
     # Check deployment health
     healthy_deployments = sum(1 for d in selected_deployments
-                            if get_deployment_status(d).startswith("✅"))
+                            if get_deployment_status(d).startswith("[+]"))
     if healthy_deployments == len(selected_deployments):
-        print(f"  ✅ All deployments are healthy")
+        print(f"  [+] All deployments are healthy")
     else:
-        print(f"  ⚠️  {len(selected_deployments) - healthy_deployments} deployment(s) have issues")
+        print(f"  [!]  {len(selected_deployments) - healthy_deployments} deployment(s) have issues")
 
     # Check for required fields
     if config.get('release'):
-        print(f"  ✅ Chart name specified")
+        print(f"  [+] Chart name specified")
     else:
-        print(f"  ⚠️  No chart name specified (will use default)")
+        print(f"  [!]  No chart name specified (will use default)")
 
     # Summary
-    print(f"\n📈 Estimated Chart Complexity: {'Low' if template_count <= 5 else 'Medium' if template_count <= 15 else 'High'}")
-    print(f"📏 Estimated Size: ~{template_count * 2}KB")
+    print(f"\n[UP] Estimated Chart Complexity: {'Low' if template_count <= 5 else 'Medium' if template_count <= 15 else 'High'}")
+    print(f"[RULER] Estimated Size: ~{template_count * 2}KB")
 
     if not validation_passed:
-        print(f"\n⚠️  Validation issues detected. Use --force to override.")
+        print(f"\n[!]  Validation issues detected. Use --force to override.")
         return False
 
-    print(f"\n✅ Ready to create chart!")
+    print(f"\n[+] Ready to create chart!")
     return True
 
 
@@ -595,7 +810,7 @@ def compare_with_existing_chart(output_dir: str, config: Dict[str, Any]) -> Opti
         "recommendations": []
     }
 
-    print(f"\n🔍 Chart Comparison: {output_dir}")
+    print(f"\n[SEARCH] Chart Comparison: {output_dir}")
     print("=" * 50)
 
     # Check Chart.yaml
@@ -608,7 +823,7 @@ def compare_with_existing_chart(output_dir: str, config: Dict[str, Any]) -> Opti
             current_version = existing_chart.get('version', '0.1.0')
             current_app_version = existing_chart.get('appVersion', '1.0.0')
 
-            print(f"📄 Existing Chart:")
+            print(f"[PAGE] Existing Chart:")
             print(f"  • Name: {existing_chart.get('name', 'unknown')}")
             print(f"  • Version: {current_version}")
             print(f"  • App Version: {current_app_version}")
@@ -622,10 +837,10 @@ def compare_with_existing_chart(output_dir: str, config: Dict[str, Any]) -> Opti
                 comparison_result["recommendations"].append(f"Bump version to {suggested_version}")
 
         except Exception as e:
-            print(f"⚠️  Could not read existing Chart.yaml: {e}")
+            print(f"[!]  Could not read existing Chart.yaml: {e}")
             comparison_result["differences"].append("Chart.yaml unreadable")
     else:
-        print(f"📄 Chart.yaml: Not found")
+        print(f"[PAGE] Chart.yaml: Not found")
         comparison_result["differences"].append("Chart.yaml missing")
 
     # Check values.yaml
@@ -635,7 +850,7 @@ def compare_with_existing_chart(output_dir: str, config: Dict[str, Any]) -> Opti
             with open(values_yaml_path, 'r') as f:
                 existing_values = yaml.safe_load(f)
 
-            print(f"\n📋 Existing values.yaml:")
+            print(f"\n>> Existing values.yaml:")
             if existing_values:
                 # Check for common sections
                 sections = ["image", "replicaCount", "service", "resources"]
@@ -646,21 +861,21 @@ def compare_with_existing_chart(output_dir: str, config: Dict[str, Any]) -> Opti
                         print(f"  ✗ {section} (missing)")
                         comparison_result["differences"].append(f"values.yaml missing {section}")
             else:
-                print(f"  ⚠️  Empty or invalid values.yaml")
+                print(f"  [!]  Empty or invalid values.yaml")
                 comparison_result["differences"].append("values.yaml empty")
 
         except Exception as e:
-            print(f"⚠️  Could not read existing values.yaml: {e}")
+            print(f"[!]  Could not read existing values.yaml: {e}")
             comparison_result["differences"].append("values.yaml unreadable")
     else:
-        print(f"📋 values.yaml: Not found")
+        print(f">> values.yaml: Not found")
         comparison_result["differences"].append("values.yaml missing")
 
     # Check templates directory
     templates_path = chart_path / "templates"
     if templates_path.exists() and templates_path.is_dir():
         template_files = list(templates_path.glob("*.yaml"))
-        print(f"\n📁 Templates: {len(template_files)} files")
+        print(f"\n[DIR] Templates: {len(template_files)} files")
 
         # Categorize templates
         template_types = {}
@@ -680,12 +895,12 @@ def compare_with_existing_chart(output_dir: str, config: Dict[str, Any]) -> Opti
             print(f"  • {resource_type}: {len(files)}")
 
     else:
-        print(f"📁 templates/: Not found or empty")
+        print(f"[DIR] templates/: Not found or empty")
         comparison_result["differences"].append("templates directory missing")
 
     # Generate recommendations
     if comparison_result["differences"]:
-        print(f"\n💡 Recommendations:")
+        print(f"\n[TIP] Recommendations:")
         comparison_result["recommendations"].extend([
             "Update chart to include missing components",
             "Review and merge existing configuration",
@@ -694,7 +909,7 @@ def compare_with_existing_chart(output_dir: str, config: Dict[str, Any]) -> Opti
         for rec in comparison_result["recommendations"]:
             print(f"  • {rec}")
     else:
-        print(f"\n✅ Chart structure looks complete")
+        print(f"\n[+] Chart structure looks complete")
         comparison_result["recommendations"].append("Consider incremental update")
 
     return comparison_result
@@ -707,7 +922,7 @@ def handle_existing_chart_update(output_dir: str, config: Dict[str, Any]) -> str
     if not comparison or not comparison["exists"]:
         return "create"  # No existing chart, create new one
 
-    print(f"\n🔄 Chart Update Options:")
+    print(f"\n[CYCLE] Chart Update Options:")
     print("=" * 30)
     print("  1. Overwrite existing chart (replace)")
     print("  2. Update chart version and merge")
@@ -747,7 +962,7 @@ def handle_existing_chart_update(output_dir: str, config: Dict[str, Any]) -> str
 
 def bulk_export_namespace(namespace: str, output_base_dir: str = "./charts") -> None:
     """Export all deployments in a namespace as individual charts."""
-    print(f"\n🚀 Bulk Export: Namespace '{namespace}'")
+    print(f"\n[ROCKET] Bulk Export: Namespace '{namespace}'")
     print("=" * 50)
 
     # Get all deployments
@@ -779,7 +994,7 @@ def bulk_export_namespace(namespace: str, output_base_dir: str = "./charts") -> 
     successful_exports = []
     failed_exports = []
 
-    print(f"\n📦 Starting bulk export...")
+    print(f"\n[BOX] Starting bulk export...")
     print(f"Output directory: {output_base_dir}")
 
     # Export individual charts
@@ -805,8 +1020,8 @@ def bulk_export_namespace(namespace: str, output_base_dir: str = "./charts") -> 
             apply_config_to_args(args, config)
 
             # Quick preview without interaction
-            print(f"  📋 Chart: {deployment_name}")
-            print(f"  📁 Output: {config['output_dir']}")
+            print(f"  >> Chart: {deployment_name}")
+            print(f"  [DIR] Output: {config['output_dir']}")
 
             # Find related resources
             related_resources = find_related_resources([deployment], namespace)
@@ -815,9 +1030,9 @@ def bulk_export_namespace(namespace: str, output_base_dir: str = "./charts") -> 
                 for resource_type, items in related_resources.items():
                     if items:
                         total_resources += len(items)
-                        print(f"  📦 {resource_type.title()}: {len(items)}")
+                        print(f"  [BOX] {resource_type.title()}: {len(items)}")
 
-            print(f"  📊 Total resources: {total_resources}")
+            print(f"  [CHART] Total resources: {total_resources}")
 
             # Create the chart
             exporter = ChartExporter(args)
@@ -828,18 +1043,18 @@ def bulk_export_namespace(namespace: str, output_base_dir: str = "./charts") -> 
                 'path': config['output_dir'],
                 'resources': total_resources
             })
-            print(f"  ✅ Exported successfully")
+            print(f"  [+] Exported successfully")
 
         except Exception as e:
             failed_exports.append({
                 'name': deployment_name,
                 'error': str(e)
             })
-            print(f"  ❌ Export failed: {e}")
+            print(f"  [-] Export failed: {e}")
 
     # Create combined chart if requested
     if create_combined_chart and successful_exports:
-        print(f"\n🔗 Creating combined chart...")
+        print(f"\n[LINK] Creating combined chart...")
         try:
             combined_config = {
                 'namespace': namespace,
@@ -858,37 +1073,37 @@ def bulk_export_namespace(namespace: str, output_base_dir: str = "./charts") -> 
             exporter = ChartExporter(args)
             exporter.run()
 
-            print(f"  ✅ Combined chart created: {combined_config['output_dir']}")
+            print(f"  [+] Combined chart created: {combined_config['output_dir']}")
 
         except Exception as e:
-            print(f"  ❌ Combined chart failed: {e}")
+            print(f"  [-] Combined chart failed: {e}")
 
     # Summary report
-    print(f"\n📊 Bulk Export Summary")
+    print(f"\n[CHART] Bulk Export Summary")
     print("=" * 30)
-    print(f"✅ Successful: {len(successful_exports)}")
-    print(f"❌ Failed: {len(failed_exports)}")
+    print(f"[+] Successful: {len(successful_exports)}")
+    print(f"[-] Failed: {len(failed_exports)}")
 
     if successful_exports:
-        print(f"\n📦 Successfully exported charts:")
+        print(f"\n[BOX] Successfully exported charts:")
         for export in successful_exports:
             print(f"  • {export['name']} ({export['resources']} resources)")
-            print(f"    📁 {export['path']}")
+            print(f"    [DIR] {export['path']}")
 
     if failed_exports:
-        print(f"\n❌ Failed exports:")
+        print(f"\n[-] Failed exports:")
         for failure in failed_exports:
             print(f"  • {failure['name']}: {failure['error']}")
 
     # Next steps
     if successful_exports:
-        print(f"\n🎯 Next Steps:")
-        print(f"📦 Package charts:")
+        print(f"\n[TARGET] Next Steps:")
+        print(f"[BOX] Package charts:")
         for export in successful_exports:
             chart_dir = Path(export['path']).name
             print(f"  helm package {chart_dir}")
 
-        print(f"\n🚀 Deploy charts:")
+        print(f"\n[ROCKET] Deploy charts:")
         for export in successful_exports:
             chart_dir = Path(export['path']).name
             print(f"  helm install {export['name']} ./{chart_dir}")
@@ -897,7 +1112,7 @@ def bulk_export_namespace(namespace: str, output_base_dir: str = "./charts") -> 
 def bulk_export_by_selector(label_selector: str, namespace: str = "default",
                            output_base_dir: str = "./charts") -> None:
     """Export all deployments matching a label selector."""
-    print(f"\n🎯 Bulk Export by Selector: '{label_selector}'")
+    print(f"\n[TARGET] Bulk Export by Selector: '{label_selector}'")
     print("=" * 50)
 
     try:
@@ -954,7 +1169,7 @@ def bulk_export_filtered_deployments(deployments: List[Dict[str, Any]], namespac
                                    output_base_dir: str, selector_info: str = "") -> None:
     """Helper function to export a pre-filtered list of deployments."""
     # Similar to bulk_export_namespace but with pre-filtered deployments
-    print(f"\n🚀 Bulk Export: {len(deployments)} filtered deployments")
+    print(f"\n[ROCKET] Bulk Export: {len(deployments)} filtered deployments")
     if selector_info:
         print(f"Selector: {selector_info}")
     print("=" * 50)
@@ -992,51 +1207,51 @@ def bulk_export_filtered_deployments(deployments: List[Dict[str, Any]], namespac
             exporter.run()
 
             successful_exports.append(deployment_name)
-            print(f"  ✅ Success")
+            print(f"  [+] Success")
 
         except Exception as e:
             failed_exports.append((deployment_name, str(e)))
-            print(f"  ❌ Failed: {e}")
+            print(f"  [-] Failed: {e}")
 
     # Summary
-    print(f"\n📊 Bulk Export Results:")
-    print(f"✅ Success: {len(successful_exports)}")
-    print(f"❌ Failed: {len(failed_exports)}")
+    print(f"\n[CHART] Bulk Export Results:")
+    print(f"[+] Success: {len(successful_exports)}")
+    print(f"[-] Failed: {len(failed_exports)}")
 
 
 def handle_kubectl_error(error: subprocess.CalledProcessError, operation: str) -> None:
     """Handle kubectl command errors with helpful suggestions."""
-    print(f"\n❌ {operation} failed")
+    print(f"\n[-] {operation} failed")
 
     stderr = error.stderr or ""
 
     if "connection refused" in stderr.lower():
-        print("🔧 Kubernetes connection issue:")
+        print("[TOOL] Kubernetes connection issue:")
         print("  • Check if kubectl is configured correctly")
         print("  • Verify cluster is accessible: kubectl cluster-info")
         print("  • Check if you're using the right context: kubectl config current-context")
 
     elif "forbidden" in stderr.lower() or "unauthorized" in stderr.lower():
-        print("🔒 Permission issue:")
+        print("[LOCK] Permission issue:")
         print("  • Check if you have the required permissions")
         print("  • Verify your kubeconfig is valid")
         print("  • Try: kubectl auth can-i get deployments")
 
     elif "not found" in stderr.lower():
-        print("🔍 Resource not found:")
+        print("[SEARCH] Resource not found:")
         print("  • Check if the namespace exists: kubectl get namespaces")
         print("  • Verify deployment names: kubectl get deployments -A")
         print("  • Check if you're using the correct namespace")
 
     elif "no such host" in stderr.lower() or "network" in stderr.lower():
-        print("🌐 Network connectivity issue:")
+        print("[NET] Network connectivity issue:")
         print("  • Check your internet connection")
         print("  • Verify VPN settings if using corporate network")
         print("  • Try: kubectl version --client")
 
     else:
-        print(f"📋 Error details: {stderr}")
-        print("💡 Troubleshooting tips:")
+        print(f">> Error details: {stderr}")
+        print("[TIP] Troubleshooting tips:")
         print("  • Check kubectl configuration: kubectl config view")
         print("  • Test basic connectivity: kubectl get nodes")
         print("  • Verify permissions: kubectl auth can-i '*' '*'")
@@ -1052,7 +1267,7 @@ def retry_operation(operation_func, operation_name: str, max_retries: int = 3) -
                 handle_kubectl_error(e, operation_name)
                 raise
 
-            print(f"\n⚠️  {operation_name} failed (attempt {attempt + 1}/{max_retries})")
+            print(f"\n[!]  {operation_name} failed (attempt {attempt + 1}/{max_retries})")
             print(f"Error: {e.stderr or e}")
 
             if not prompt_yes_no(f"Retry {operation_name}?", True):
@@ -1061,10 +1276,10 @@ def retry_operation(operation_func, operation_name: str, max_retries: int = 3) -
             print("Retrying...")
         except Exception as e:
             if attempt == max_retries - 1:
-                print(f"\n❌ {operation_name} failed: {e}")
+                print(f"\n[-] {operation_name} failed: {e}")
                 raise
 
-            print(f"\n⚠️  {operation_name} failed (attempt {attempt + 1}/{max_retries}): {e}")
+            print(f"\n[!]  {operation_name} failed (attempt {attempt + 1}/{max_retries}): {e}")
 
             if not prompt_yes_no(f"Retry {operation_name}?", True):
                 raise
@@ -1082,16 +1297,16 @@ def detect_kubernetes_access_scope() -> Dict[str, Any]:
         "recommended_mode": "namespace-only"
     }
 
-    print("🔍 Detecting Kubernetes access scope...")
+    print(">> Detecting Kubernetes access scope...")
 
     # Test 1: Try cluster-level access
     try:
         result = subprocess.run(["kubectl", "cluster-info"],
                               capture_output=True, text=True, check=True, timeout=5)
         access_info["cluster_access"] = True
-        print("✅ Cluster-level access detected")
+        print("[+] Cluster-level access detected")
     except:
-        print("📝 No cluster-level access (restricted environment)")
+        print("[!] No cluster-level access (restricted environment)")
 
     # Test 2: Try to list namespaces
     try:
@@ -1099,11 +1314,11 @@ def detect_kubernetes_access_scope() -> Dict[str, Any]:
                               capture_output=True, text=True, check=True, timeout=5)
         namespaces = [line.split()[0] for line in result.stdout.split('\n') if line.strip()]
         access_info["available_namespaces"] = namespaces
-        print(f"✅ Can list namespaces: {len(namespaces)} found")
+        print(f"[+] Can list namespaces: {len(namespaces)} found")
         if namespaces:
             access_info["recommended_mode"] = "multi-namespace"
     except:
-        print("📝 Cannot list namespaces (namespace-scoped access)")
+        print("[!] Cannot list namespaces (namespace-scoped access)")
 
     # Test 3: Check current context default namespace
     try:
@@ -1112,7 +1327,7 @@ def detect_kubernetes_access_scope() -> Dict[str, Any]:
                               capture_output=True, text=True, check=True)
         if result.stdout.strip():
             access_info["default_namespace"] = result.stdout.strip()
-            print(f"📍 Default namespace from context: {access_info['default_namespace']}")
+            print(f"[*] Default namespace from context: {access_info['default_namespace']}")
     except:
         pass
 
@@ -1127,15 +1342,15 @@ def detect_kubernetes_access_scope() -> Dict[str, Any]:
                 "accessible": True,
                 "deployment_count": len(lines)
             }
-            print(f"✅ Namespace '{ns}': {len(lines)} deployment(s)")
+            print(f"[+] Namespace '{ns}': {len(lines)} deployment(s)")
         except subprocess.CalledProcessError as e:
             stderr = e.stderr or ""
             if "forbidden" in stderr.lower():
                 access_info["namespace_access"][ns] = {"accessible": False, "reason": "forbidden"}
-                print(f"🔒 Namespace '{ns}': Access denied")
+                print(f"[-] Namespace '{ns}': Access denied")
             elif "not found" in stderr.lower():
                 access_info["namespace_access"][ns] = {"accessible": False, "reason": "not_found"}
-                print(f"❓ Namespace '{ns}': Not found")
+                print(f"[?] Namespace '{ns}': Not found")
         except:
             access_info["namespace_access"][ns] = {"accessible": False, "reason": "unknown"}
 
@@ -1144,32 +1359,32 @@ def detect_kubernetes_access_scope() -> Dict[str, Any]:
 
 def prompt_for_access_scope(access_info: Dict[str, Any]) -> Dict[str, Any]:
     """Interactive prompt to select access scope and target namespace."""
-    print(f"\n🎯 Kubernetes Access Configuration")
+    print(f"\n[TARGET] Kubernetes Access Configuration")
     print("=" * 50)
 
     # Show detected capabilities
-    print("📋 Detected capabilities:")
+    print(">> Detected capabilities:")
     if access_info["cluster_access"]:
-        print("  ✅ Cluster-level access (can run cluster-info)")
+        print("  [+] Cluster-level access (can run cluster-info)")
     else:
-        print("  📝 Namespace-scoped access (no cluster-level permissions)")
+        print("  [NOTE] Namespace-scoped access (no cluster-level permissions)")
 
     if access_info["available_namespaces"]:
-        print(f"  ✅ Can list namespaces ({len(access_info['available_namespaces'])} available)")
+        print(f"  [+] Can list namespaces ({len(access_info['available_namespaces'])} available)")
     else:
-        print("  📝 Cannot list namespaces (restricted to specific namespaces)")
+        print("  [NOTE] Cannot list namespaces (restricted to specific namespaces)")
 
     # Show accessible namespaces
     accessible_ns = {ns: info for ns, info in access_info["namespace_access"].items()
                     if info.get("accessible", False)}
 
     if accessible_ns:
-        print(f"\n📦 Accessible namespaces with deployments:")
+        print(f"\n[BOX] Accessible namespaces with deployments:")
         for ns, info in accessible_ns.items():
             count = info.get("deployment_count", 0)
             print(f"  • {ns}: {count} deployment(s)")
     else:
-        print(f"\n⚠️  No accessible namespaces detected with the test")
+        print(f"\n[!]  No accessible namespaces detected with the test")
 
     # Determine options based on access level
     options = []
@@ -1190,7 +1405,7 @@ def prompt_for_access_scope(access_info: Dict[str, Any]) -> Dict[str, Any]:
         # Fallback if we can't detect anything
         options.append(("manual", "Manual configuration (specify namespace)"))
 
-    print(f"\n🎯 Access mode options:")
+    print(f"\n[TARGET] Access mode options:")
     for i, (mode, description) in enumerate(options, 1):
         print(f"  {i}. {description}")
 
@@ -1215,7 +1430,7 @@ def prompt_for_access_scope(access_info: Dict[str, Any]) -> Dict[str, Any]:
 
     if mode == "multi":
         # Let user browse all namespaces
-        print(f"\n📋 Available namespaces:")
+        print(f"\n>> Available namespaces:")
         for i, ns in enumerate(access_info["available_namespaces"], 1):
             print(f"  {i}. {ns}")
 
@@ -1240,7 +1455,7 @@ def prompt_for_access_scope(access_info: Dict[str, Any]) -> Dict[str, Any]:
     elif mode == "select":
         # Let user select from accessible namespaces
         accessible_list = list(accessible_ns.keys())
-        print(f"\n📦 Select from accessible namespaces:")
+        print(f"\n[BOX] Select from accessible namespaces:")
         for i, ns in enumerate(accessible_list, 1):
             count = accessible_ns[ns].get("deployment_count", 0)
             print(f"  {i}. {ns} ({count} deployments)")
@@ -1269,16 +1484,16 @@ def prompt_for_access_scope(access_info: Dict[str, Any]) -> Dict[str, Any]:
     selected_config["skip_cluster_check"] = not access_info["cluster_access"]
     selected_config["namespace_only"] = not access_info["cluster_access"]
 
-    print(f"\n✅ Configuration selected:")
-    print(f"  📍 Target namespace: {selected_config['namespace']}")
-    print(f"  🔒 Mode: {'Namespace-only' if selected_config['namespace_only'] else 'Cluster-aware'}")
+    print(f"\n[+] Configuration selected:")
+    print(f"  [PIN] Target namespace: {selected_config['namespace']}")
+    print(f"  [LOCK] Mode: {'Namespace-only' if selected_config['namespace_only'] else 'Cluster-aware'}")
 
     return selected_config
 
 
 def validate_prerequisites(skip_cluster_check: bool = False, namespace: str = "default") -> bool:
     """Validate that required tools are available."""
-    print("🔍 Validating prerequisites...")
+    print("[SEARCH] Validating prerequisites...")
 
     missing_tools = []
 
@@ -1286,12 +1501,12 @@ def validate_prerequisites(skip_cluster_check: bool = False, namespace: str = "d
     try:
         result = subprocess.run(["kubectl", "version", "--client"],
                               capture_output=True, text=True, check=True)
-        print("✅ kubectl is available")
+        print("[+] kubectl is available")
     except FileNotFoundError:
         missing_tools.append("kubectl")
-        print("❌ kubectl not found")
+        print("[-] kubectl not found")
     except subprocess.CalledProcessError:
-        print("⚠️  kubectl found but may have issues")
+        print("[!]  kubectl found but may have issues")
 
     # Check namespace access (more reliable than cluster-info for restricted environments)
     if not skip_cluster_check:
@@ -1299,24 +1514,24 @@ def validate_prerequisites(skip_cluster_check: bool = False, namespace: str = "d
             # Try namespace-scoped access first (works with restricted permissions)
             result = subprocess.run(["kubectl", "get", "deployments", "-n", namespace, "--no-headers"],
                                   capture_output=True, text=True, check=True, timeout=10)
-            print(f"✅ Kubernetes namespace '{namespace}' is accessible")
+            print(f"[+] Kubernetes namespace '{namespace}' is accessible")
 
             # Count deployments
             lines = [line for line in result.stdout.split('\n') if line.strip()]
-            print(f"📦 Found {len(lines)} deployment(s) in namespace '{namespace}'")
+            print(f"[BOX] Found {len(lines)} deployment(s) in namespace '{namespace}'")
 
         except subprocess.CalledProcessError as e:
-            print(f"❌ Cannot access namespace '{namespace}'")
+            print(f"[-] Cannot access namespace '{namespace}'")
 
             # Try to give helpful error messages
             stderr = e.stderr or ""
             if "forbidden" in stderr.lower():
-                print("🔒 Permission issue:")
+                print("[LOCK] Permission issue:")
                 print(f"  • Check if you have access to namespace '{namespace}'")
                 print(f"  • Try: kubectl auth can-i get deployments -n {namespace}")
                 print(f"  • Contact your cluster administrator for namespace access")
             elif "not found" in stderr.lower():
-                print("🔍 Namespace not found:")
+                print("[SEARCH] Namespace not found:")
                 print(f"  • Check if namespace '{namespace}' exists")
                 print(f"  • Try: kubectl get namespaces (if you have permission)")
                 print(f"  • Or specify a different namespace with --namespace")
@@ -1325,25 +1540,25 @@ def validate_prerequisites(skip_cluster_check: bool = False, namespace: str = "d
 
             return False
         except subprocess.TimeoutExpired:
-            print(f"⚠️  Kubernetes namespace '{namespace}' connection timeout")
+            print(f"[!]  Kubernetes namespace '{namespace}' connection timeout")
             print("   This may indicate network issues or slow cluster")
         except FileNotFoundError:
             pass  # kubectl already reported as missing
     else:
-        print("⚠️  Namespace connectivity check skipped")
+        print("[!]  Namespace connectivity check skipped")
 
     # Check helm (optional)
     try:
         result = subprocess.run(["helm", "version"],
                               capture_output=True, text=True, check=True)
-        print("✅ helm is available (optional)")
+        print("[+] helm is available (optional)")
     except FileNotFoundError:
         print("ℹ️  helm not found (optional - charts can still be created)")
     except subprocess.CalledProcessError:
-        print("⚠️  helm found but may have issues (optional)")
+        print("[!]  helm found but may have issues (optional)")
 
     if missing_tools:
-        print(f"\n❌ Missing required tools: {', '.join(missing_tools)}")
+        print(f"\n[-] Missing required tools: {', '.join(missing_tools)}")
         print("📖 Installation help:")
         for tool in missing_tools:
             if tool == "kubectl":
@@ -1355,36 +1570,36 @@ def validate_prerequisites(skip_cluster_check: bool = False, namespace: str = "d
 
 def handle_chart_creation_error(error: Exception, deployment_name: str) -> bool:
     """Handle chart creation errors with recovery options."""
-    print(f"\n❌ Chart creation failed for '{deployment_name}': {error}")
+    print(f"\n[-] Chart creation failed for '{deployment_name}': {error}")
 
     # Analyze error and provide specific guidance
     error_str = str(error).lower()
 
     if "permission denied" in error_str:
-        print("🔒 File permission issue:")
+        print("[LOCK] File permission issue:")
         print("  • Check if output directory is writable")
         print("  • Try a different output directory")
         print("  • On Windows, try running as administrator")
 
     elif "no space left" in error_str:
-        print("💾 Disk space issue:")
+        print("[DISK] Disk space issue:")
         print("  • Free up disk space")
         print("  • Try a different output directory")
 
     elif "file exists" in error_str or "directory not empty" in error_str:
-        print("📁 Output directory conflict:")
+        print("[DIR] Output directory conflict:")
         print("  • Use --force to overwrite existing files")
         print("  • Choose a different output directory")
         print("  • Manually remove existing directory")
 
     elif "template" in error_str or "yaml" in error_str:
-        print("📝 Template generation issue:")
+        print("[NOTE] Template generation issue:")
         print("  • This may be due to unusual resource configurations")
         print("  • Try with a simpler deployment first")
         print("  • Check if deployment has all required fields")
 
     else:
-        print("🔧 General troubleshooting:")
+        print("[TOOL] General troubleshooting:")
         print("  • Try with --verbose for more details")
         print("  • Ensure deployment is running properly")
         print("  • Check kubectl permissions")
@@ -1397,26 +1612,26 @@ def safe_file_operation(operation_func, operation_name: str, file_path: str = ""
     try:
         return operation_func()
     except PermissionError:
-        print(f"❌ Permission denied: {operation_name}")
+        print(f"[-] Permission denied: {operation_name}")
         if file_path:
             print(f"   File: {file_path}")
-        print("💡 Try:")
+        print("[TIP] Try:")
         print("  • Check file/directory permissions")
         print("  • Close any applications using the file")
         print("  • Run with elevated permissions if necessary")
         raise
     except FileNotFoundError:
-        print(f"❌ File not found: {operation_name}")
+        print(f"[-] File not found: {operation_name}")
         if file_path:
             print(f"   File: {file_path}")
-        print("💡 Check if the path exists and is correct")
+        print("[TIP] Check if the path exists and is correct")
         raise
     except OSError as e:
-        print(f"❌ File system error: {operation_name}")
+        print(f"[-] File system error: {operation_name}")
         if file_path:
             print(f"   File: {file_path}")
         print(f"   Error: {e}")
-        print("💡 This may be due to:")
+        print("[TIP] This may be due to:")
         print("  • Insufficient disk space")
         print("  • File system corruption")
         print("  • Path too long (Windows)")
@@ -1463,6 +1678,568 @@ def generate_demo_deployments() -> List[Dict[str, Any]]:
             "images": ["myapp/notifications:v1.8.2"]
         }
     ]
+
+
+def extract_deployment_details(deployment_name: str, namespace: str) -> Dict[str, Any]:
+    """Extract comprehensive deployment configuration from Kubernetes."""
+    try:
+        cmd = ["kubectl", "get", "deployment", deployment_name, "-n", namespace, "-o", "json"]
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        deployment_data = json.loads(result.stdout)
+
+        metadata = deployment_data.get("metadata", {})
+        spec = deployment_data.get("spec", {})
+        template = spec.get("template", {})
+        pod_spec = template.get("spec", {})
+        containers = pod_spec.get("containers", [])
+        init_containers = pod_spec.get("initContainers", [])
+
+        if not containers:
+            return {}
+
+        # Extract from first container (main container)
+        main_container = containers[0]
+
+        extracted = {
+            "name": deployment_name,
+            "namespace": namespace,
+            "replicas": spec.get("replicas", 1),
+            "revisionHistoryLimit": spec.get("revisionHistoryLimit", 10),
+            "strategy": spec.get("strategy", {}),
+            "minReadySeconds": spec.get("minReadySeconds", 0),
+            "progressDeadlineSeconds": spec.get("progressDeadlineSeconds", 600),
+
+            # Metadata
+            "labels": metadata.get("labels", {}),
+            "annotations": metadata.get("annotations", {}),
+
+            # Pod template metadata
+            "podLabels": template.get("metadata", {}).get("labels", {}),
+            "podAnnotations": template.get("metadata", {}).get("annotations", {}),
+
+            # Main container image
+            "image": {
+                "repository": main_container.get("image", "").split(":")[0] if ":" in main_container.get("image", "") else main_container.get("image", ""),
+                "tag": main_container.get("image", "").split(":")[-1] if ":" in main_container.get("image", "") else "latest",
+                "pullPolicy": main_container.get("imagePullPolicy", "IfNotPresent")
+            },
+
+            # All containers
+            "containers": [],
+            "initContainers": [],
+
+            # Environment configuration
+            "env": {},
+            "envFrom": [],
+
+            # Resource configuration
+            "resources": {},
+
+            # Networking
+            "ports": [],
+            "hostNetwork": pod_spec.get("hostNetwork", False),
+            "dnsPolicy": pod_spec.get("dnsPolicy", "ClusterFirst"),
+            "dnsConfig": pod_spec.get("dnsConfig", {}),
+
+            # Storage
+            "volumeMounts": [],
+            "volumes": [],
+
+            # Security
+            "securityContext": {},
+            "podSecurityContext": pod_spec.get("securityContext", {}),
+            "serviceAccount": pod_spec.get("serviceAccountName", ""),
+            "serviceAccountName": pod_spec.get("serviceAccountName", ""),
+            "automountServiceAccountToken": pod_spec.get("automountServiceAccountToken", True),
+
+            # Scheduling
+            "nodeSelector": pod_spec.get("nodeSelector", {}),
+            "tolerations": pod_spec.get("tolerations", []),
+            "affinity": pod_spec.get("affinity", {}),
+            "topologySpreadConstraints": pod_spec.get("topologySpreadConstraints", []),
+            "schedulerName": pod_spec.get("schedulerName", ""),
+            "priority": pod_spec.get("priority", 0),
+            "priorityClassName": pod_spec.get("priorityClassName", ""),
+            "runtimeClassName": pod_spec.get("runtimeClassName", ""),
+
+            # Lifecycle
+            "restartPolicy": pod_spec.get("restartPolicy", "Always"),
+            "terminationGracePeriodSeconds": pod_spec.get("terminationGracePeriodSeconds", 30),
+            "activeDeadlineSeconds": pod_spec.get("activeDeadlineSeconds", 0),
+
+            # Image pull
+            "imagePullSecrets": pod_spec.get("imagePullSecrets", []),
+
+            # Host configuration
+            "hostPID": pod_spec.get("hostPID", False),
+            "hostIPC": pod_spec.get("hostIPC", False),
+            "shareProcessNamespace": pod_spec.get("shareProcessNamespace", False),
+
+            # Probes (from main container)
+            "livenessProbe": main_container.get("livenessProbe", {}),
+            "readinessProbe": main_container.get("readinessProbe", {}),
+            "startupProbe": main_container.get("startupProbe", {}),
+
+            # Additional container settings
+            "workingDir": main_container.get("workingDir", ""),
+            "command": main_container.get("command", []),
+            "args": main_container.get("args", []),
+            "stdin": main_container.get("stdin", False),
+            "stdinOnce": main_container.get("stdinOnce", False),
+            "tty": main_container.get("tty", False)
+        }
+
+        # Extract all containers (main + sidecars)
+        for container in containers:
+            container_info = {
+                "name": container.get("name", ""),
+                "image": container.get("image", ""),
+                "imagePullPolicy": container.get("imagePullPolicy", "IfNotPresent"),
+                "ports": container.get("ports", []),
+                "env": container.get("env", []),
+                "envFrom": container.get("envFrom", []),
+                "resources": container.get("resources", {}),
+                "volumeMounts": container.get("volumeMounts", []),
+                "securityContext": container.get("securityContext", {}),
+                "livenessProbe": container.get("livenessProbe", {}),
+                "readinessProbe": container.get("readinessProbe", {}),
+                "startupProbe": container.get("startupProbe", {}),
+                "lifecycle": container.get("lifecycle", {}),
+                "workingDir": container.get("workingDir", ""),
+                "command": container.get("command", []),
+                "args": container.get("args", []),
+                "stdin": container.get("stdin", False),
+                "stdinOnce": container.get("stdinOnce", False),
+                "tty": container.get("tty", False),
+                "terminationMessagePath": container.get("terminationMessagePath", "/dev/termination-log"),
+                "terminationMessagePolicy": container.get("terminationMessagePolicy", "File")
+            }
+            extracted["containers"].append(container_info)
+
+        # Extract init containers
+        for init_container in init_containers:
+            init_info = {
+                "name": init_container.get("name", ""),
+                "image": init_container.get("image", ""),
+                "imagePullPolicy": init_container.get("imagePullPolicy", "IfNotPresent"),
+                "env": init_container.get("env", []),
+                "envFrom": init_container.get("envFrom", []),
+                "resources": init_container.get("resources", {}),
+                "volumeMounts": init_container.get("volumeMounts", []),
+                "securityContext": init_container.get("securityContext", {}),
+                "workingDir": init_container.get("workingDir", ""),
+                "command": init_container.get("command", []),
+                "args": init_container.get("args", [])
+            }
+            extracted["initContainers"].append(init_info)
+
+        # Extract environment variables from main container with comprehensive handling
+        main_env = main_container.get("env", [])
+        for env_var in main_env:
+            name = env_var.get("name", "")
+            if "value" in env_var:
+                # Direct string value
+                extracted["env"][name] = env_var["value"]
+            elif "valueFrom" in env_var:
+                # Handle references to ConfigMaps, Secrets, resource fields, etc.
+                value_from = env_var["valueFrom"]
+                if "configMapKeyRef" in value_from:
+                    ref = value_from["configMapKeyRef"]
+                    extracted["env"][name] = {
+                        "valueFrom": {
+                            "configMapKeyRef": {
+                                "name": ref.get("name", ""),
+                                "key": ref.get("key", ""),
+                                "optional": ref.get("optional", False)
+                            }
+                        }
+                    }
+                elif "secretKeyRef" in value_from:
+                    ref = value_from["secretKeyRef"]
+                    extracted["env"][name] = {
+                        "valueFrom": {
+                            "secretKeyRef": {
+                                "name": ref.get("name", ""),
+                                "key": ref.get("key", ""),
+                                "optional": ref.get("optional", False)
+                            }
+                        }
+                    }
+                elif "fieldRef" in value_from:
+                    field_ref = value_from["fieldRef"]
+                    extracted["env"][name] = {
+                        "valueFrom": {
+                            "fieldRef": {
+                                "fieldPath": field_ref.get("fieldPath", ""),
+                                "apiVersion": field_ref.get("apiVersion", "v1")
+                            }
+                        }
+                    }
+                elif "resourceFieldRef" in value_from:
+                    resource_ref = value_from["resourceFieldRef"]
+                    extracted["env"][name] = {
+                        "valueFrom": {
+                            "resourceFieldRef": {
+                                "resource": resource_ref.get("resource", ""),
+                                "containerName": resource_ref.get("containerName", ""),
+                                "divisor": resource_ref.get("divisor", "1")
+                            }
+                        }
+                    }
+
+        # Extract envFrom (ConfigMaps and Secrets)
+        extracted["envFrom"] = main_container.get("envFrom", [])
+
+        # Extract resources
+        resources = main_container.get("resources", {})
+        if resources:
+            extracted["resources"] = resources
+
+        # Extract ports
+        ports = main_container.get("ports", [])
+        for port in ports:
+            extracted["ports"].append({
+                "name": port.get("name", ""),
+                "containerPort": port.get("containerPort", 8080),
+                "protocol": port.get("protocol", "TCP")
+            })
+
+        # Extract volume mounts
+        extracted["volumeMounts"] = main_container.get("volumeMounts", [])
+
+        # Extract volumes from pod spec
+        extracted["volumes"] = pod_spec.get("volumes", [])
+
+        # Extract security context
+        extracted["securityContext"] = pod_spec.get("securityContext", {})
+
+        return extracted
+
+    except Exception as e:
+        print(f"[!]  Failed to extract deployment details for {deployment_name}: {e}")
+        return {}
+
+
+def generate_enhanced_values_yaml(deployment_details: Dict[str, Any], related_resources: Dict[str, Any]) -> Dict[str, Any]:
+    """Generate comprehensive values.yaml from deployment details and related resources."""
+    values = {
+        "# Values extracted from live Kubernetes deployment": None,
+        "replicaCount": deployment_details.get("replicas", 1),
+        "image": deployment_details.get("image", {
+            "repository": "nginx",
+            "tag": "latest",
+            "pullPolicy": "IfNotPresent"
+        })
+    }
+
+    # Add environment variables
+    env_vars = deployment_details.get("env", {})
+    if env_vars:
+        values["env"] = env_vars
+
+    # Add envFrom references
+    env_from = deployment_details.get("envFrom", [])
+    if env_from:
+        values["envFrom"] = env_from
+
+    # Add resources
+    resources = deployment_details.get("resources", {})
+    if resources:
+        values["resources"] = resources
+    else:
+        # Provide sensible defaults
+        values["resources"] = {
+            "limits": {
+                "cpu": "500m",
+                "memory": "512Mi"
+            },
+            "requests": {
+                "cpu": "100m",
+                "memory": "128Mi"
+            }
+        }
+
+    # Add ports
+    ports = deployment_details.get("ports", [])
+    if ports:
+        values["ports"] = ports
+        # Set main service port from first container port
+        if ports[0].get("containerPort"):
+            values["service"] = {
+                "type": "ClusterIP",
+                "port": 80,
+                "targetPort": ports[0]["containerPort"]
+            }
+    else:
+        values["service"] = {
+            "type": "ClusterIP",
+            "port": 80,
+            "targetPort": 8080
+        }
+
+    # Add volume mounts
+    volume_mounts = deployment_details.get("volumeMounts", [])
+    if volume_mounts:
+        values["volumeMounts"] = volume_mounts
+
+    # Add volumes
+    volumes = deployment_details.get("volumes", [])
+    if volumes:
+        values["volumes"] = volumes
+
+    # Add security context
+    security_context = deployment_details.get("securityContext", {})
+    if security_context:
+        values["securityContext"] = security_context
+
+    # Add service account
+    service_account = deployment_details.get("serviceAccount", "")
+    if service_account:
+        values["serviceAccount"] = {
+            "create": False,
+            "name": service_account
+        }
+
+    # Add node selector
+    node_selector = deployment_details.get("nodeSelector", {})
+    if node_selector:
+        values["nodeSelector"] = node_selector
+
+    # Add tolerations
+    tolerations = deployment_details.get("tolerations", [])
+    if tolerations:
+        values["tolerations"] = tolerations
+
+    # Add affinity
+    affinity = deployment_details.get("affinity", {})
+    if affinity:
+        values["affinity"] = affinity
+
+    # Add all containers info for multi-container deployments
+    containers = deployment_details.get("containers", [])
+    if len(containers) > 1:
+        values["additionalContainers"] = containers[1:]  # Skip main container
+
+    # Add related resources
+    for resource_type, resources_list in related_resources.items():
+        if resources_list:
+            values[resource_type] = {}
+            for resource in resources_list:
+                resource_name = resource.get("name", "unknown")
+                values[resource_type][resource_name] = {
+                    "enabled": True,
+                    "data": resource.get("data", {})
+                }
+
+    return values
+
+
+def create_enhanced_chart(deployment_details: Dict[str, Any], related_resources: Dict[str, Any], output_dir: str) -> None:
+    """Create a comprehensive Helm chart from detailed deployment and resource data."""
+    chart_path = Path(output_dir)
+    chart_path.mkdir(parents=True, exist_ok=True)
+
+    # Create templates directory
+    templates_path = chart_path / "templates"
+    templates_path.mkdir(exist_ok=True)
+
+    deployment_name = deployment_details.get("name", "app")
+    image_info = deployment_details.get("image", {})
+
+    # Generate Chart.yaml
+    chart_yaml = {
+        "apiVersion": "v2",
+        "name": deployment_name,
+        "description": f"Helm chart for {deployment_name} exported from Kubernetes",
+        "type": "application",
+        "version": "0.1.0",
+        "appVersion": image_info.get("tag", "latest")
+    }
+
+    with open(chart_path / "Chart.yaml", 'w') as f:
+        yaml.dump(chart_yaml, f, default_flow_style=False)
+
+    # Generate enhanced values.yaml
+    values_yaml = generate_enhanced_values_yaml(deployment_details, related_resources)
+
+    with open(chart_path / "values.yaml", 'w') as f:
+        yaml.dump(values_yaml, f, default_flow_style=False, sort_keys=False)
+
+    # Generate enhanced deployment template
+    deployment_template = generate_deployment_template(deployment_details)
+    with open(templates_path / f"deployment.yaml", 'w') as f:
+        f.write(deployment_template)
+
+    # Generate service template if ports are defined
+    if deployment_details.get("ports"):
+        service_template = generate_service_template(deployment_name)
+        with open(templates_path / f"service.yaml", 'w') as f:
+            f.write(service_template)
+
+    # Generate templates for related resources
+    for resource_type, resources_list in related_resources.items():
+        for resource in resources_list:
+            template_content = generate_resource_template(resource_type, resource)
+            if template_content:
+                resource_name = resource.get("name", "resource")
+                with open(templates_path / f"{resource_type}-{resource_name}.yaml", 'w') as f:
+                    f.write(template_content)
+
+    print(f"  [+] Enhanced chart created: {output_dir}")
+    print(f"     [DIR] Chart.yaml, values.yaml with real config, and {len(list(templates_path.glob('*.yaml')))} templates")
+
+
+def generate_deployment_template(deployment_details: Dict[str, Any]) -> str:
+    """Generate a comprehensive deployment template."""
+    deployment_name = deployment_details.get("name", "app")
+
+    template = f"""apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {deployment_name}
+  labels:
+    {{{{- include "{deployment_name}.labels" . | nindent 4 }}}}
+spec:
+  {{{{- if not .Values.autoscaling.enabled }}}}
+  replicas: {{{{ .Values.replicaCount }}}}
+  {{{{- end }}}}
+  selector:
+    matchLabels:
+      {{{{- include "{deployment_name}.selectorLabels" . | nindent 6 }}}}
+  template:
+    metadata:
+      {{{{- with .Values.podAnnotations }}}}
+      annotations:
+        {{{{- toYaml . | nindent 8 }}}}
+      {{{{- end }}}}
+      labels:
+        {{{{- include "{deployment_name}.selectorLabels" . | nindent 8 }}}}
+    spec:
+      {{{{- with .Values.imagePullSecrets }}}}
+      imagePullSecrets:
+        {{{{- toYaml . | nindent 8 }}}}
+      {{{{- end }}}}
+      {{{{- if .Values.serviceAccount.name }}}}
+      serviceAccountName: {{{{ .Values.serviceAccount.name }}}}
+      {{{{- end }}}}
+      {{{{- with .Values.securityContext }}}}
+      securityContext:
+        {{{{- toYaml . | nindent 8 }}}}
+      {{{{- end }}}}
+      containers:
+        - name: {{{{ .Chart.Name }}}}
+          image: "{{{{ .Values.image.repository }}}}:{{{{ .Values.image.tag | default .Chart.AppVersion }}}}"
+          imagePullPolicy: {{{{ .Values.image.pullPolicy }}}}
+          {{{{- if .Values.ports }}}}
+          ports:
+            {{{{- range .Values.ports }}}}
+            - name: {{{{ .name | default "http" }}}}
+              containerPort: {{{{ .containerPort }}}}
+              protocol: {{{{ .protocol | default "TCP" }}}}
+            {{{{- end }}}}
+          {{{{- end }}}}
+          {{{{- if .Values.env }}}}
+          env:
+            {{{{- range $key, $value := .Values.env }}}}
+            - name: {{{{ $key }}}}
+              value: {{{{ $value | quote }}}}
+            {{{{- end }}}}
+          {{{{- end }}}}
+          {{{{- with .Values.envFrom }}}}
+          envFrom:
+            {{{{- toYaml . | nindent 12 }}}}
+          {{{{- end }}}}
+          {{{{- with .Values.resources }}}}
+          resources:
+            {{{{- toYaml . | nindent 12 }}}}
+          {{{{- end }}}}
+          {{{{- with .Values.volumeMounts }}}}
+          volumeMounts:
+            {{{{- toYaml . | nindent 12 }}}}
+          {{{{- end }}}}
+      {{{{- with .Values.volumes }}}}
+      volumes:
+        {{{{- toYaml . | nindent 8 }}}}
+      {{{{- end }}}}
+      {{{{- with .Values.nodeSelector }}}}
+      nodeSelector:
+        {{{{- toYaml . | nindent 8 }}}}
+      {{{{- end }}}}
+      {{{{- with .Values.affinity }}}}
+      affinity:
+        {{{{- toYaml . | nindent 8 }}}}
+      {{{{- end }}}}
+      {{{{- with .Values.tolerations }}}}
+      tolerations:
+        {{{{- toYaml . | nindent 8 }}}}
+      {{{{- end }}}}
+"""
+    return template
+
+
+def generate_service_template(deployment_name: str) -> str:
+    """Generate service template."""
+    return f"""apiVersion: v1
+kind: Service
+metadata:
+  name: {deployment_name}
+  labels:
+    {{{{- include "{deployment_name}.labels" . | nindent 4 }}}}
+spec:
+  type: {{{{ .Values.service.type }}}}
+  ports:
+    - port: {{{{ .Values.service.port }}}}
+      targetPort: {{{{ .Values.service.targetPort }}}}
+      protocol: TCP
+      name: http
+  selector:
+    {{{{- include "{deployment_name}.selectorLabels" . | nindent 4 }}}}
+"""
+
+
+def generate_resource_template(resource_type: str, resource: Dict[str, Any]) -> str:
+    """Generate template for ConfigMaps, Secrets, etc."""
+    resource_name = resource.get("name", "resource")
+
+    if resource_type == "configmaps":
+        return f"""{{{{- if .Values.configmaps.{resource_name}.enabled }}}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {resource_name}
+  labels:
+    {{{{- include "app.labels" . | nindent 4 }}}}
+data:
+{{{{ toYaml .Values.configmaps.{resource_name}.data | indent 2 }}}}
+{{{{- end }}}}
+"""
+    elif resource_type == "secrets":
+        return f"""{{{{- if .Values.secrets.{resource_name}.enabled }}}}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {resource_name}
+  labels:
+    {{{{- include "app.labels" . | nindent 4 }}}}
+type: Opaque
+data:
+{{{{ toYaml .Values.secrets.{resource_name}.data | indent 2 }}}}
+{{{{- end }}}}
+"""
+    elif resource_type == "persistentvolumeclaims":
+        return f"""{{{{- if .Values.persistentvolumeclaims.{resource_name}.enabled }}}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {resource_name}
+  labels:
+    {{{{- include "app.labels" . | nindent 4 }}}}
+spec:
+{{{{ toYaml .Values.persistentvolumeclaims.{resource_name}.spec | indent 2 }}}}
+{{{{- end }}}}
+"""
+
+    return ""
 
 
 def create_demo_chart(deployment: Dict[str, Any], output_dir: str) -> None:
@@ -1598,21 +2375,21 @@ data:
         with open(templates_path / f"configmap-{deployment_name}.yaml", 'w') as f:
             f.write(configmap_template)
 
-    print(f"  ✅ Demo chart created: {output_dir}")
-    print(f"     📁 Chart.yaml, values.yaml, and {len(list(templates_path.glob('*.yaml')))} templates")
+    print(f"  [+] Demo chart created: {output_dir}")
+    print(f"     [DIR] Chart.yaml, values.yaml, and {len(list(templates_path.glob('*.yaml')))} templates")
 
 
 def run_demo_mode() -> None:
     """Run demo mode with sample deployments."""
-    print("🎭 Demo Mode: Generating sample charts")
+    print("[MASK] Demo Mode: Generating sample charts")
     print("=" * 50)
 
     deployments = generate_demo_deployments()
 
-    print(f"📦 Sample deployments available:")
+    print(f"[BOX] Sample deployments available:")
     display_deployments_menu(deployments)
 
-    print(f"\n🎯 Demo Options:")
+    print(f"\n[TARGET] Demo Options:")
     print("  1. Create individual charts for each deployment")
     print("  2. Interactive selection (test search/filter)")
     print("  3. Bulk export demo")
@@ -1631,8 +2408,8 @@ def run_demo_mode() -> None:
                 print(f"\nCreating demo chart: {deployment_name}")
                 create_demo_chart(deployment, output_dir)
 
-            print(f"\n🎉 Created {len(deployments)} demo charts in {base_dir}/")
-            print(f"\n🔧 Test with Helm:")
+            print(f"\n[PARTY] Created {len(deployments)} demo charts in {base_dir}/")
+            print(f"\n[TOOL] Test with Helm:")
             for deployment in deployments:
                 chart_dir = f"{deployment['name']}-chart"
                 print(f"  helm template {deployment['name']} {base_dir}/{chart_dir}")
@@ -1640,7 +2417,7 @@ def run_demo_mode() -> None:
 
         elif choice == "2":
             # Interactive selection demo
-            print(f"\n🔍 Testing search and filter interface...")
+            print(f"\n[SEARCH] Testing search and filter interface...")
             selected = select_deployments_multi(deployments)
 
             if selected:
@@ -1651,12 +2428,12 @@ def run_demo_mode() -> None:
                     output_dir = f"{base_dir}/{deployment['name']}-chart"
                     create_demo_chart(deployment, output_dir)
 
-                print(f"\n✅ Created charts for {len(selected)} selected deployments")
+                print(f"\n[+] Created charts for {len(selected)} selected deployments")
             break
 
         elif choice == "3":
             # Bulk demo
-            print(f"\n🚀 Bulk export demo...")
+            print(f"\n[ROCKET] Bulk export demo...")
             base_dir = "./demo-charts"
             Path(base_dir).mkdir(exist_ok=True)
 
@@ -1665,9 +2442,9 @@ def run_demo_mode() -> None:
                 output_dir = f"{base_dir}/{deployment['name']}-chart"
                 create_demo_chart(deployment, output_dir)
 
-            print(f"\n📊 Bulk Demo Complete:")
-            print(f"✅ Success: {len(deployments)}")
-            print(f"❌ Failed: 0")
+            print(f"\n[CHART] Bulk Demo Complete:")
+            print(f"[+] Success: {len(deployments)}")
+            print(f"[-] Failed: 0")
             break
 
         else:
@@ -1680,15 +2457,15 @@ def get_deployment_status(deployment_data: Dict[str, Any]) -> str:
     total_replicas = deployment_data.get("replicas", 0)
 
     if total_replicas == 0:
-        return "⚪ Stopped"
+        return "[CIRCLE] Stopped"
     elif ready_replicas == total_replicas:
-        return "✅ Ready"
+        return "[+] Ready"
     elif ready_replicas == 0:
-        return "❌ Failed"
+        return "[-] Failed"
     elif ready_replicas < total_replicas:
-        return "⚠️ Issue"
+        return "[!] Issue"
     else:
-        return "🔄 Scaling"
+        return "[CYCLE] Scaling"
 
 
 def interactive_search_filter(deployments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1701,7 +2478,7 @@ def interactive_search_filter(deployments: List[Dict[str, Any]]) -> List[Dict[st
     active_filters = {}
 
     while True:
-        print(f"\n🔍 Search & Filter Interface")
+        print(f"\n[SEARCH] Search & Filter Interface")
         print("=" * 50)
         print(f"Showing {len(filtered_deployments)} of {len(deployments)} deployments")
 
@@ -1987,7 +2764,7 @@ def prompt_for_deployment_based_config() -> Dict[str, Any]:
         # Apply dependency selections to config
         if selected_deps.get('secrets'):
             config['include_secrets'] = True
-            print("✅ Enabled secret inclusion due to discovered dependencies")
+            print("[+] Enabled secret inclusion due to discovered dependencies")
 
         # Store selected dependencies for filtering
         config['selected_dependencies'] = selected_deps
@@ -2071,9 +2848,48 @@ def run_interactive_config() -> Optional[Dict[str, Any]]:
     return config
 
 
-def find_related_resources(deployments: List[Dict[str, Any]], namespace: str) -> Dict[str, List[str]]:
-    """Find ConfigMaps, Secrets, Services, and PVCs related to selected deployments."""
+def extract_related_resource_data(resource_type: str, resource_name: str, namespace: str) -> Dict[str, Any]:
+    """Extract actual data from a related resource."""
+    try:
+        cmd = ["kubectl", "get", resource_type, resource_name, "-n", namespace, "-o", "json"]
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        resource_data = json.loads(result.stdout)
+
+        extracted = {
+            "name": resource_name,
+            "type": resource_data.get("type", "Opaque") if resource_type == "secret" else None,
+            "data": resource_data.get("data", {}),
+            "metadata": {
+                "labels": resource_data.get("metadata", {}).get("labels", {}),
+                "annotations": resource_data.get("metadata", {}).get("annotations", {})
+            }
+        }
+
+        # For PVCs, capture the spec
+        if resource_type == "persistentvolumeclaim":
+            extracted["spec"] = resource_data.get("spec", {})
+            extracted["status"] = resource_data.get("status", {})
+
+        # For Services, capture the spec
+        if resource_type == "service":
+            extracted["spec"] = resource_data.get("spec", {})
+
+        return extracted
+    except Exception as e:
+        print(f"[!]  Failed to extract {resource_type} {resource_name}: {e}")
+        return {"name": resource_name, "data": {}}
+
+
+def find_related_resources_with_data(deployments: List[Dict[str, Any]], namespace: str) -> Dict[str, List[Dict[str, Any]]]:
+    """Find ConfigMaps, Secrets, Services, and PVCs related to selected deployments with their actual data."""
     related_resources = {
+        "configmaps": [],
+        "secrets": [],
+        "services": [],
+        "persistentvolumeclaims": []
+    }
+
+    found_names = {
         "configmaps": set(),
         "secrets": set(),
         "services": set(),
@@ -2088,7 +2904,10 @@ def find_related_resources(deployments: List[Dict[str, Any]], namespace: str) ->
         try:
             # Get all resources in namespace
             for resource_type in ["configmaps", "secrets", "services", "persistentvolumeclaims"]:
-                cmd = ["kubectl", "get", resource_type, "-n", namespace, "-o", "json"]
+                # Use singular form for kubectl
+                kubectl_resource_type = resource_type[:-1] if resource_type.endswith('s') else resource_type
+
+                cmd = ["kubectl", "get", kubectl_resource_type, "-n", namespace, "-o", "json"]
                 result = subprocess.run(cmd, capture_output=True, text=True, check=True)
                 data = json.loads(result.stdout)
 
@@ -2097,28 +2916,45 @@ def find_related_resources(deployments: List[Dict[str, Any]], namespace: str) ->
                     item_name = item_metadata.get("name", "")
                     item_labels = item_metadata.get("labels", {})
 
+                    # Skip if already found
+                    if item_name in found_names[resource_type]:
+                        continue
+
                     # Match by name patterns
+                    is_related = False
                     if (deployment_name in item_name or
                         item_name in deployment_name or
                         any(label_value == item_name for label_value in labels.values())):
-                        related_resources[resource_type].add(item_name)
+                        is_related = True
 
                     # Match by common labels
                     if "app" in labels and labels["app"] in item_labels.get("app", ""):
-                        related_resources[resource_type].add(item_name)
+                        is_related = True
+
+                    if is_related:
+                        # Extract the actual resource data
+                        resource_data = extract_related_resource_data(kubectl_resource_type, item_name, namespace)
+                        if resource_data:
+                            related_resources[resource_type].append(resource_data)
+                            found_names[resource_type].add(item_name)
 
         except subprocess.CalledProcessError:
             continue  # Skip if resource type not accessible
         except Exception:
             continue  # Skip on any error
 
-    # Convert sets to lists
-    return {k: sorted(list(v)) for k, v in related_resources.items()}
+    return related_resources
+
+
+def find_related_resources(deployments: List[Dict[str, Any]], namespace: str) -> Dict[str, List[str]]:
+    """Legacy function - find related resource names only."""
+    data_resources = find_related_resources_with_data(deployments, namespace)
+    return {k: [res["name"] for res in v] for k, v in data_resources.items()}
 
 
 def display_dependency_suggestions(deployments: List[Dict[str, Any]], namespace: str) -> Dict[str, List[str]]:
     """Display and let user select related resources."""
-    print(f"\n🔍 Scanning for related resources...")
+    print(f"\n[SEARCH] Scanning for related resources...")
     related = find_related_resources(deployments, namespace)
 
     selected_resources = {}
@@ -2132,7 +2968,7 @@ def display_dependency_suggestions(deployments: List[Dict[str, Any]], namespace:
 
     for resource_type, resources in related.items():
         if resources:
-            print(f"\n📦 {resource_type.title()}:")
+            print(f"\n[BOX] {resource_type.title()}:")
             for i, resource in enumerate(resources, 1):
                 print(f"  {i}. {resource}")
 
@@ -2248,15 +3084,70 @@ class ChartExporter:
         if not exported:
             self.logger.warning("No resources were exported. Review your filters and try again.")
 
-        # Update Chart.yaml and values.yaml with actual resource data
-        if exported:
-            self._update_chart_metadata(exported)
-            self._generate_values_yaml(exported)
+        # Enhanced chart generation for deployments
+        if hasattr(self.args, 'selected_deployments') and self.args.selected_deployments:
+            self._generate_enhanced_charts()
+        else:
+            # Update Chart.yaml and values.yaml with actual resource data
+            if exported:
+                self._update_chart_metadata(exported)
+                self._generate_values_yaml(exported)
 
         if self.args.lint and shutil.which("helm"):
             self._run_helm_lint()
 
         self._write_summary(exported)
+
+    # ------------------------------------------------------------------
+    # Enhanced chart generation
+    # ------------------------------------------------------------------
+    def _generate_enhanced_charts(self) -> None:
+        """Generate enhanced charts with comprehensive deployment details and related resources."""
+        print("\n[TOOL] Generating enhanced charts with comprehensive configuration...")
+
+        for deployment in self.args.selected_deployments:
+            deployment_name = deployment["name"]
+            namespace = self.args.namespace
+
+            print(f"\n[BOX] Processing deployment: {deployment_name}")
+
+            # Extract comprehensive deployment details
+            print("  [SEARCH] Extracting deployment configuration...")
+            deployment_details = extract_deployment_details(deployment_name, namespace)
+
+            if not deployment_details:
+                print(f"  [-] Failed to extract deployment details for {deployment_name}")
+                continue
+
+            # Find and extract related resources with their data
+            print("  [LINK] Finding related resources...")
+            related_resources_with_data = find_related_resources_with_data([deployment], namespace)
+
+            # Count related resources
+            total_related = sum(len(resources) for resources in related_resources_with_data.values())
+            if total_related > 0:
+                print(f"  [PAGE] Found {total_related} related resources")
+                for resource_type, resources in related_resources_with_data.items():
+                    if resources:
+                        print(f"    - {len(resources)} {resource_type}")
+
+            # Create enhanced chart
+            chart_output_dir = str(self.chart_path)
+            if hasattr(self.args, 'multi_deployment') and self.args.multi_deployment:
+                # For multi-deployment, create a combined chart
+                chart_output_dir = str(self.chart_path)
+            else:
+                # For single deployment, use specific directory
+                chart_output_dir = str(self.chart_path)
+
+            print(f"  [ART] Creating enhanced Helm chart...")
+            create_enhanced_chart(deployment_details, related_resources_with_data, chart_output_dir)
+
+            # Print summary
+            print(f"  [+] Enhanced chart created for {deployment_name}")
+            print(f"     [CHART] Configuration: {len(deployment_details.get('env', {}))} env vars, "
+                  f"{len(deployment_details.get('volumes', []))} volumes, "
+                  f"{len(deployment_details.get('containers', []))} containers")
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -2765,133 +3656,204 @@ class ChartExporter:
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Capture live Kubernetes resources and generate a Helm chart",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-    parser.add_argument("release", nargs='?', help="Name to use for the generated Helm chart")
-    parser.add_argument(
-        "--namespace",
-        default="default",
-        help="Namespace to inspect when fetching resources",
-    )
-    parser.add_argument(
-        "--output-dir",
-        default="./generated-chart",
-        help="Directory where the chart will be written",
-    )
-    parser.add_argument(
-        "--selector",
-        help="Label selector used to filter resources (e.g. app=my-app)",
-    )
-    parser.add_argument(
-        "--only",
-        nargs="*",
-        help="Limit the export to the specified resource kinds",
-    )
-    parser.add_argument(
-        "--exclude",
-        nargs="*",
-        help="Exclude specific resource kinds from the export",
-    )
-    parser.add_argument(
-        "--kubeconfig",
-        help="Path to an alternate kubeconfig file",
-    )
-    parser.add_argument(
-        "--context",
-        help="Kubernetes context to use when executing kubectl commands",
-    )
-    parser.add_argument(
-        "--prefix",
-        default="",
-        help="Prefix to prepend to generated manifest filenames",
-    )
-    parser.add_argument(
-        "--include-secrets",
+        prog="grabby-helm",
+        description="Grabby-Helm: Interactive Kubernetes to Helm Chart Converter",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+EXAMPLES:
+  grabby-helm                          # Interactive mode (default)
+  grabby-helm --explore               # Explore deployments and create charts
+  grabby-helm --configs               # Manage saved configurations
+  grabby-helm --bulk                  # Bulk export entire namespaces
+  grabby-helm --demo                  # Demo mode with sample data
+
+STATE FLAGS (select application mode):
+  Default behavior is interactive mode if no state flag is provided.
+        """)
+
+    # === PRIMARY COMMANDS (State Flags) ===
+    command_group = parser.add_argument_group('APPLICATION MODES')
+
+    # Interactive mode (default)
+    command_group.add_argument(
+        "--explore",
         action="store_true",
-        help="Include Kubernetes Secret resources in the generated chart",
+        help="Launch interactive deployment explorer and chart creator",
     )
-    parser.add_argument(
-        "--include-service-account-secrets",
+
+    # Configuration management
+    command_group.add_argument(
+        "--configs",
         action="store_true",
-        help="Also capture service account token secrets (implies --include-secrets)",
+        help="Manage saved configurations (view, delete, organize)",
     )
-    parser.add_argument(
-        "--force",
+
+    # Bulk operations
+    command_group.add_argument(
+        "--bulk",
         action="store_true",
-        help="Overwrite the output directory if it already exists",
+        help="Bulk export mode - export entire namespaces or label selections",
     )
-    parser.add_argument(
-        "--lint",
+
+    # Demo and testing
+    command_group.add_argument(
+        "--demo",
         action="store_true",
-        help="Run 'helm lint' after generating the chart",
+        help="Demo mode - generate sample charts without cluster access",
     )
-    parser.add_argument(
-        "--chart-version",
-        default="0.1.0",
-        help="Chart version to set in Chart.yaml",
+
+    # Debug and diagnostics
+    command_group.add_argument(
+        "--debug",
+        action="store_true",
+        help="Debug mode - analyze cluster connectivity and permissions",
     )
-    parser.add_argument(
-        "--app-version",
-        default="1.0.0",
-        help="Application version to set in Chart.yaml",
+
+    # === MODIFIER FLAGS (modify behavior) ===
+    modifier_group = parser.add_argument_group('BEHAVIOR MODIFIERS')
+
+    modifier_group.add_argument(
+        "--auto-detect",
+        action="store_true",
+        help="Automatically detect and configure access scope",
     )
-    parser.add_argument(
+
+    modifier_group.add_argument(
+        "--namespace-restricted",
+        action="store_true",
+        help="Use namespace-only mode (for restricted environments)",
+    )
+
+    modifier_group.add_argument(
+        "--offline",
+        action="store_true",
+        help="Skip cluster connectivity checks",
+    )
+
+    modifier_group.add_argument(
+        "--force-overwrite",
+        action="store_true",
+        help="Overwrite existing files without confirmation",
+    )
+
+    modifier_group.add_argument(
+        "--no-interactive",
+        action="store_true",
+        help="Disable all interactive prompts (use defaults)",
+    )
+
+    modifier_group.add_argument(
         "--verbose",
         action="store_true",
-        help="Enable verbose logging",
+        help="Enable detailed output and logging",
     )
-    parser.add_argument(
-        "--interactive",
-        action="store_true",
-        help="Launch an interactive picker to choose deployments and related resources",
+
+    # === CONFIGURATION OPTIONS ===
+    config_group = parser.add_argument_group('CONFIGURATION OPTIONS')
+
+    config_group.add_argument(
+        "--namespace",
+        metavar="NAME",
+        help="Target namespace (default: auto-detect or 'default')",
     )
-    parser.add_argument(
+
+    config_group.add_argument(
+        "--kubeconfig",
+        metavar="PATH",
+        help="Path to kubeconfig file (default: ~/.kube/config)",
+    )
+
+    config_group.add_argument(
+        "--context",
+        metavar="NAME",
+        help="Kubernetes context to use",
+    )
+
+    config_group.add_argument(
+        "--output",
+        metavar="DIR",
+        help="Output directory for generated charts",
+    )
+
+    # === LEGACY COMPATIBILITY ===
+    legacy_group = parser.add_argument_group('LEGACY COMPATIBILITY (deprecated)')
+
+    # Keep some key legacy arguments for backward compatibility
+    legacy_group.add_argument(
+        "release",
+        nargs='?',
+        help="[DEPRECATED] Chart name - use interactive mode instead",
+    )
+
+    legacy_group.add_argument(
         "--config-prompt",
         action="store_true",
-        help="Use interactive configuration prompting",
+        help="[DEPRECATED] Use --explore instead",
     )
-    parser.add_argument(
-        "--no-preview",
+
+    legacy_group.add_argument(
+        "--interactive",
         action="store_true",
-        help="Skip preview and validation before chart creation",
+        help="[DEPRECATED] Use --explore instead",
     )
-    parser.add_argument(
+
+    legacy_group.add_argument(
         "--bulk-namespace",
         metavar="NAMESPACE",
-        help="Export all deployments in the specified namespace",
+        help="[DEPRECATED] Use --bulk instead",
     )
-    parser.add_argument(
-        "--bulk-selector",
-        metavar="SELECTOR",
-        help="Export all deployments matching the label selector (e.g., 'app=frontend')",
-    )
-    parser.add_argument(
-        "--skip-cluster-check",
-        action="store_true",
-        help="Skip cluster connectivity validation (useful for testing or when cluster is temporarily unavailable)",
-    )
-    parser.add_argument(
+
+    legacy_group.add_argument(
         "--demo-mode",
         action="store_true",
-        help="Generate demo charts with sample data (no cluster required)",
+        help="[DEPRECATED] Use --demo instead",
     )
-    parser.add_argument(
+
+    legacy_group.add_argument(
         "--debug-data",
         action="store_true",
-        help="Show detailed debugging information about retrieved cluster data",
-    )
-    parser.add_argument(
-        "--namespace-only",
-        action="store_true",
-        help="Use namespace-only mode (for environments with restricted cluster access)",
+        help="[DEPRECATED] Use --debug instead",
     )
 
     args = parser.parse_args(argv)
 
-    if args.include_service_account_secrets:
-        args.include_secrets = True
+    # === POST-PROCESSING AND VALIDATION ===
 
+    # Handle legacy compatibility
+    if hasattr(args, 'config_prompt') and args.config_prompt:
+        args.explore = True
+        print("[DEPRECATED] --config-prompt is deprecated. Use --explore instead.")
+
+    if hasattr(args, 'interactive') and args.interactive:
+        args.explore = True
+        print("[DEPRECATED] --interactive is deprecated. Use --explore instead.")
+
+    if hasattr(args, 'demo_mode') and args.demo_mode:
+        args.demo = True
+        print("[DEPRECATED] --demo-mode is deprecated. Use --demo instead.")
+
+    if hasattr(args, 'debug_data') and args.debug_data:
+        args.debug = True
+        print("[DEPRECATED] --debug-data is deprecated. Use --debug instead.")
+
+    # Map new flags to legacy internal names for compatibility
+    args.namespace_only = getattr(args, 'namespace_restricted', False)
+    args.skip_cluster_check = getattr(args, 'offline', False)
+    args.force = getattr(args, 'force_overwrite', False)
+    args.auto_scope = getattr(args, 'auto_detect', False)
+
+    # Set default mode if no state flag is provided
+    state_flags = [args.explore, args.configs, args.bulk, args.demo, args.debug]
+    if not any(state_flags):
+        # Default to explore mode (interactive)
+        args.explore = True
+
+    # Validate mutually exclusive states
+    active_states = sum(state_flags)
+    if active_states > 1:
+        parser.error("Only one application mode can be active at a time. Use --help for examples.")
+
+    # Set up logging
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(levelname)s: %(message)s",
@@ -2900,13 +3862,139 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     return args
 
 
+def perform_startup_scope_detection() -> Dict[str, Any]:
+    """Perform automatic scope detection at application startup."""
+    print("\n" + "=" * 60)
+    print("                AUTO-SCOPE DETECTION")
+    print("=" * 60)
+    print("Automatically detecting your Kubernetes access permissions...")
+
+    # Detect access scope
+    access_info = detect_kubernetes_access_scope()
+
+    # Determine best configuration automatically
+    auto_config = {
+        "namespace": "default",
+        "namespace_only": False,
+        "skip_cluster_check": False,
+        "detected_capabilities": access_info,
+        "confidence": "high"
+    }
+
+    # Analysis and automatic decision making
+    if access_info["cluster_access"]:
+        print("[+] Cluster-level access detected")
+        if access_info["available_namespaces"]:
+            print(f"[+] Can list namespaces ({len(access_info['available_namespaces'])} found)")
+
+            # Choose best namespace automatically
+            accessible_ns = {ns: info for ns, info in access_info["namespace_access"].items()
+                           if info.get("accessible", False)}
+
+            if accessible_ns:
+                # Pick namespace with most deployments, or default if available
+                best_ns = "default"
+                max_deployments = 0
+
+                if "default" in accessible_ns and accessible_ns["default"].get("accessible", False):
+                    best_ns = "default"
+                    max_deployments = accessible_ns["default"].get("deployment_count", 0)
+
+                for ns, info in accessible_ns.items():
+                    if info.get("deployment_count", 0) > max_deployments:
+                        best_ns = ns
+                        max_deployments = info.get("deployment_count", 0)
+
+                auto_config["namespace"] = best_ns
+                print(f"[+] Selected namespace: {best_ns} ({max_deployments} deployments)")
+            else:
+                auto_config["namespace"] = "default"
+                print("[!] No accessible namespaces found, using default")
+                auto_config["confidence"] = "medium"
+        else:
+            print("[!] Cannot list namespaces (restricted access)")
+            auto_config["namespace_only"] = True
+            auto_config["confidence"] = "medium"
+    else:
+        print("[!] No cluster-level access (namespace-scoped environment)")
+        auto_config["namespace_only"] = True
+        auto_config["skip_cluster_check"] = True
+
+        # Try to determine current namespace
+        accessible_ns = {ns: info for ns, info in access_info["namespace_access"].items()
+                        if info.get("accessible", False)}
+
+        if accessible_ns:
+            # Use the namespace with most deployments
+            best_ns = max(accessible_ns.keys(),
+                         key=lambda ns: accessible_ns[ns].get("deployment_count", 0))
+            auto_config["namespace"] = best_ns
+            count = accessible_ns[best_ns].get("deployment_count", 0)
+            print(f"[+] Selected namespace: {best_ns} ({count} deployments)")
+        else:
+            print("[!] No accessible namespaces detected, using default")
+            auto_config["confidence"] = "low"
+
+    # Summary
+    print(f"\n>> AUTO-DETECTED CONFIGURATION:")
+    print(f"   Namespace: {auto_config['namespace']}")
+    print(f"   Mode: {'Namespace-only' if auto_config['namespace_only'] else 'Cluster-aware'}")
+    print(f"   Confidence: {auto_config['confidence'].upper()}")
+
+    # Offer to save configuration for future use
+    if auto_config["confidence"] in ["high", "medium"]:
+        save_choice = prompt_yes_no("\nSave this configuration for future use?", True)
+        if save_choice:
+            config_name = prompt_optional("Configuration name", f"auto-detected-{auto_config['namespace']}")
+            if config_name:
+                # Create a configuration suitable for saving
+                save_config_data = {
+                    "namespace": auto_config["namespace"],
+                    "namespace_only": auto_config["namespace_only"],
+                    "skip_cluster_check": auto_config["skip_cluster_check"],
+                    "selector": "",
+                    "output_dir": f"./{auto_config['namespace']}-chart",
+                    "release": f"{auto_config['namespace']}-app",
+                    "auto_detected": True,
+                    "detection_confidence": auto_config["confidence"]
+                }
+                save_config(config_name, save_config_data)
+                print(f"[+] Configuration saved as '{config_name}'")
+
+    return auto_config
+
+
+def apply_auto_scope_config(args: argparse.Namespace, config: Dict[str, Any]) -> None:
+    """Apply auto-detected scope configuration to command line arguments."""
+
+    # Only apply if not explicitly set by user
+    if not hasattr(args, 'namespace') or args.namespace == "default":
+        args.namespace = config["namespace"]
+
+    if not args.namespace_only:
+        args.namespace_only = config["namespace_only"]
+
+    if not args.skip_cluster_check:
+        args.skip_cluster_check = config["skip_cluster_check"]
+
+    # Add detected config for later use
+    args.auto_detected_config = config
+
+    print(f"\n[+] Applied auto-detected configuration:")
+    print(f"    --namespace {args.namespace}")
+    if args.namespace_only:
+        print(f"    --namespace-only")
+    if args.skip_cluster_check:
+        print(f"    --skip-cluster-check")
+
+
 def run_chart_creation_workflow(skip_cluster_check: bool = False, namespace: str = "default",
                                 auto_scope: bool = True) -> None:
     """Run the chart creation workflow with option for multiple charts."""
 
     # Auto-detect access scope and prompt user for configuration
     if auto_scope:
-        print("🔍 Starting Kubernetes access detection...")
+        print("[SEARCH] Starting Kubernetes access detection...")
         access_info = detect_kubernetes_access_scope()
         scope_config = prompt_for_access_scope(access_info)
 
@@ -2920,9 +4008,9 @@ def run_chart_creation_workflow(skip_cluster_check: bool = False, namespace: str
 
     # Validate prerequisites
     if not validate_prerequisites(skip_cluster_check, namespace):
-        print("\n❌ Prerequisites not met. Please install missing tools and try again.")
-        print("💡 Use --skip-cluster-check to bypass namespace connectivity validation.")
-        print(f"💡 Use --namespace <name> to specify a different namespace than '{namespace}'.")
+        print("\n[-] Prerequisites not met. Please install missing tools and try again.")
+        print("[TIP] Use --skip-cluster-check to bypass namespace connectivity validation.")
+        print(f"[TIP] Use --namespace <name> to specify a different namespace than '{namespace}'.")
         return
 
     charts_created = []
@@ -2977,7 +4065,7 @@ def run_chart_creation_workflow(skip_cluster_check: bool = False, namespace: str
                 exporter.run()
 
                 charts_created.append(args.release)
-                print(f"✅ Chart '{args.release}' created successfully!")
+                print(f"[+] Chart '{args.release}' created successfully!")
 
                 # Ask if user wants to create another chart
                 if not prompt_yes_no("\nWould you like to create another chart from a different deployment?", False):
@@ -2985,7 +4073,7 @@ def run_chart_creation_workflow(skip_cluster_check: bool = False, namespace: str
 
             except Exception as e:
                 logging.error("Chart creation failed: %s", e)
-                print(f"\n🔍 Debug info for failed chart creation:")
+                print(f"\n[SEARCH] Debug info for failed chart creation:")
                 print(f"  Chart name: {args.release}")
                 print(f"  Output directory: {args.output_dir}")
                 print(f"  Namespace: {args.namespace}")
@@ -2998,7 +4086,7 @@ def run_chart_creation_workflow(skip_cluster_check: bool = False, namespace: str
                     for dep in selected_deployments:
                         print(f"    - {dep.get('name', 'unknown')}: {dep.get('images', [])}")
                 else:
-                    print(f"  ⚠️  No deployment data in config!")
+                    print(f"  [!]  No deployment data in config!")
 
                 if not handle_chart_creation_error(e, args.release):
                     break
@@ -3008,12 +4096,12 @@ def run_chart_creation_workflow(skip_cluster_check: bool = False, namespace: str
             break
         except Exception as e:
             logging.error("Unexpected error in workflow: %s", e)
-            print(f"\n❌ Unexpected error: {e}")
+            print(f"\n[-] Unexpected error: {e}")
             if not prompt_yes_no("Continue with the workflow?", False):
                 break
 
     if charts_created:
-        print(f"\n🎉 Successfully created {len(charts_created)} Helm chart(s):")
+        print(f"\n[PARTY] Successfully created {len(charts_created)} Helm chart(s):")
         for chart in charts_created:
             print(f"  - {chart}")
         print("\nYou can now package and deploy these charts:")
@@ -3023,100 +4111,176 @@ def run_chart_creation_workflow(skip_cluster_check: bool = False, namespace: str
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
-    # Use legacy implementation with interactive config
-    # Note: Improved architecture disabled to support interactive config mode
-    args = parse_args(argv)
+    """Main entry point for Grabby-Helm CLI application."""
+    try:
+        args = parse_args(argv)
 
-    # Handle debug mode first
-    if args.debug_data:
-        try:
-            namespace = args.namespace or "default"
-            debug_cluster_data(namespace)
-            return
-        except KeyboardInterrupt:
-            print("\nDebug cancelled.")
-            return
-        except Exception as e:
-            logging.error("Debug failed: %s", e)
-            return
+        # Print banner for non-quiet modes
+        if not args.no_interactive:
+            print_application_banner()
 
-    # Handle demo mode first
-    if args.demo_mode:
-        try:
-            run_demo_mode()
-            return
-        except KeyboardInterrupt:
-            print("\nDemo mode cancelled.")
-            return
-        except Exception as e:
-            logging.error("Demo mode failed: %s", e)
-            return
+        # Handle auto-detection first if requested
+        if args.auto_detect:
+            try:
+                auto_scope_config = perform_startup_scope_detection()
+                apply_auto_scope_config(args, auto_scope_config)
+            except KeyboardInterrupt:
+                print("\nAuto-detection cancelled.")
+                return
+            except Exception as e:
+                print(f"Auto-detection failed: {e}")
+                print("Continuing with manual configuration...")
 
-    # Handle bulk operations first
-    if args.bulk_namespace:
-        try:
-            bulk_export_namespace(args.bulk_namespace)
-            return
-        except KeyboardInterrupt:
-            print("\nBulk export cancelled.")
-            return
-        except Exception as e:
-            logging.error("Bulk namespace export failed: %s", e)
-            return
+        # Route to appropriate application mode
+        if args.debug:
+            run_debug_mode(args)
+        elif args.demo:
+            run_demo_mode(args)
+        elif args.configs:
+            run_config_management_mode(args)
+        elif args.bulk:
+            run_bulk_export_mode(args)
+        elif args.explore:
+            run_interactive_mode(args)
+        else:
+            # This should not happen due to default setting, but fallback to interactive
+            run_interactive_mode(args)
 
-    if args.bulk_selector:
-        try:
-            namespace = args.namespace or "default"
-            bulk_export_by_selector(args.bulk_selector, namespace)
-            return
-        except KeyboardInterrupt:
-            print("\nBulk export cancelled.")
-            return
-        except Exception as e:
-            logging.error("Bulk selector export failed: %s", e)
-            return
+    except KeyboardInterrupt:
+        print("\n\nOperation cancelled by user.")
+        return
+    except Exception as e:
+        if args.verbose if 'args' in locals() else False:
+            logging.error("Application failed: %s", e, exc_info=True)
+        else:
+            print(f"Error: {e}")
+        return
 
-    # If no release name provided or config-prompt flag is used, run interactive workflow
-    if not args.release or args.config_prompt:
-        try:
-            namespace = args.namespace or "default"
-            # Auto-enable skip cluster check for namespace-only mode
-            skip_check = args.skip_cluster_check or args.namespace_only
 
-            # Disable auto-scope if user explicitly specified namespace or namespace-only mode
-            auto_scope = not (args.namespace_only or args.namespace or args.skip_cluster_check)
+def print_application_banner() -> None:
+    """Print the application banner."""
+    print()
+    print("=" * 60)
+    print("             GRABBY-HELM")
+    print("    Kubernetes to Helm Chart Converter")
+    print("=" * 60)
 
-            if args.namespace_only:
-                print("🔒 Namespace-only mode enabled (cluster-level access not required)")
-                auto_scope = False
-            elif args.namespace:
-                print(f"📍 Using specified namespace: {namespace}")
-                auto_scope = False
 
-            run_chart_creation_workflow(skip_check, namespace, auto_scope)
-            return
+def run_debug_mode(args: argparse.Namespace) -> None:
+    """Run debug and diagnostics mode."""
+    print("\n>> DEBUG & DIAGNOSTICS MODE")
+    print("=" * 40)
 
-        except KeyboardInterrupt:
-            print("\nOperation cancelled.")
-            return
-        except Exception as e:
-            logging.error("Interactive workflow failed: %s", e)
-            return
+    namespace = args.namespace or "default"
+    debug_cluster_data(namespace)
 
-    # Direct command line usage (single chart)
-    if args.interactive:
-        preview_exporter = ChartExporter(args)
-        preview_exporter.ensure_required_binaries()
-        plan = build_interactive_plan(preview_exporter)
-        if plan.resources():
-            args.only = sorted(plan.resources())
-        args.selection_names = plan.to_dict()
-        if plan.includes_secrets():
-            args.include_secrets = True
-            args.include_service_account_secrets = True
 
-    exporter = ChartExporter(args)
-    exporter.run()
+def run_demo_mode(args: argparse.Namespace) -> None:
+    """Run demo mode with sample data."""
+    print("\n>> DEMO MODE")
+    print("=" * 40)
+    print("Generating sample charts with demo data...")
+
+    # Use the existing demo mode function but adapt it
+    run_demo_mode_legacy()
+
+
+def run_config_management_mode(args: argparse.Namespace) -> None:
+    """Run configuration management mode."""
+    print("\n>> CONFIGURATION MANAGEMENT")
+    print("=" * 40)
+
+    # Launch directly into config management
+    changes_made = manage_configs_menu()
+    if changes_made:
+        print("\nConfiguration changes saved.")
+    else:
+        print("\nNo changes made.")
+
+
+def run_bulk_export_mode(args: argparse.Namespace) -> None:
+    """Run bulk export mode."""
+    print("\n>> BULK EXPORT MODE")
+    print("=" * 40)
+
+    # Check for legacy bulk arguments first
+    if hasattr(args, 'bulk_namespace') and args.bulk_namespace:
+        print(f"Bulk exporting namespace: {args.bulk_namespace}")
+        bulk_export_namespace(args.bulk_namespace)
+        return
+
+    # Interactive bulk mode
+    print("Select bulk export type:")
+    print("  1. Export entire namespace")
+    print("  2. Export by label selector")
+    print("  3. Export multiple namespaces")
+
+    try:
+        choice = input("\nEnter choice [1-3]: ").strip()
+
+        if choice == "1":
+            namespace = args.namespace or prompt_required("Target namespace")
+            bulk_export_namespace(namespace)
+        elif choice == "2":
+            namespace = args.namespace or prompt_required("Target namespace")
+            selector = prompt_required("Label selector (e.g., app=frontend)")
+            bulk_export_by_selector(selector, namespace)
+        elif choice == "3":
+            print("Multi-namespace export coming soon!")
+        else:
+            print("Invalid choice.")
+    except (KeyboardInterrupt, EOFError):
+        print("\nBulk export cancelled.")
+
+
+def run_interactive_mode(args: argparse.Namespace) -> None:
+    """Run interactive exploration and chart creation mode."""
+    print("\n>> INTERACTIVE MODE")
+    print("=" * 40)
+
+    # Use the existing interactive workflow
+    namespace = args.namespace or "default"
+    skip_check = args.offline or args.namespace_restricted
+    auto_scope = args.auto_detect
+
+    if args.namespace_restricted:
+        print("[*] Namespace-restricted mode enabled")
+        auto_scope = False
+    elif args.namespace and args.namespace != "default":
+        print(f"[*] Using specified namespace: {namespace}")
+        auto_scope = False
+
+    run_chart_creation_workflow(skip_check, namespace, auto_scope)
+
+
+def run_demo_mode_legacy() -> None:
+    """Legacy demo mode implementation."""
+    print("Creating demo chart with sample data...")
+
+    demo_deployment = {
+        "name": "demo-app",
+        "namespace": "demo",
+        "replicas": 3,
+        "ready_replicas": 3,
+        "images": ["nginx:1.21", "redis:7-alpine"],
+        "labels": {"app": "demo-app", "version": "v1.0"},
+        "creation_time": "2024-01-01T00:00:00Z"
+    }
+
+    output_dir = "./demo-chart"
+    try:
+        create_demo_chart(demo_deployment, output_dir)
+        print(f"Demo chart created: {output_dir}")
+        print("\nDemo files:")
+        from pathlib import Path
+        chart_path = Path(output_dir)
+        if chart_path.exists():
+            for file in chart_path.rglob("*.yaml"):
+                print(f"  {file}")
+        print("\nDemo mode completed!")
+    except Exception as e:
+        print(f"Demo creation failed: {e}")
+        print("Demo mode uses sample data - no cluster connection required.")
 
 
 if __name__ == "__main__":  # pragma: no cover
