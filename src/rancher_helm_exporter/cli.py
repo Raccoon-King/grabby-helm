@@ -3059,6 +3059,23 @@ class ChartExporter:
     def run(self) -> None:
         """Execute the export pipeline."""
 
+        if hasattr(self.args, 'multi_deployment') and self.args.multi_deployment and hasattr(self.args, 'selected_deployments') and len(self.args.selected_deployments) > 1:
+            base_chart_path = self.chart_path
+            for deployment in self.args.selected_deployments:
+                deployment_name = deployment['name']
+                
+                # Create a new args object for each deployment
+                temp_args = argparse.Namespace(**vars(self.args))
+                temp_args.release = deployment_name
+                temp_args.output_dir = str(base_chart_path.parent / f"{deployment_name}-chart")
+                temp_args.selected_deployments = [deployment]
+                temp_args.multi_deployment = False
+                
+                # Create and run a new exporter for each deployment
+                exporter = ChartExporter(temp_args)
+                exporter.run()
+            return
+
         self.ensure_required_binaries()
         self._prepare_chart_directory()
 
