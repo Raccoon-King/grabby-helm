@@ -2989,10 +2989,7 @@ def display_dependency_suggestions(deployments: List[Dict[str, Any]], namespace:
 def apply_config_to_args(args: argparse.Namespace, config: Dict[str, Any]) -> None:
     """Apply configuration dictionary to an argparse namespace."""
     for key, value in config.items():
-        if key == 'release':
-            args.release = value
-        elif hasattr(args, key):
-            setattr(args, key, value)
+        setattr(args, key, value)
 
 
 @dataclass
@@ -3737,6 +3734,12 @@ STATE FLAGS (select application mode):
     )
 
     modifier_group.add_argument(
+        "--no-preview",
+        action="store_true",
+        help="Skip chart creation preview and validation",
+    )
+
+    modifier_group.add_argument(
         "--no-interactive",
         action="store_true",
         help="Disable all interactive prompts (use defaults)",
@@ -3988,7 +3991,7 @@ def apply_auto_scope_config(args: argparse.Namespace, config: Dict[str, Any]) ->
         print(f"    --skip-cluster-check")
 
 
-def run_chart_creation_workflow(skip_cluster_check: bool = False, namespace: str = "default",
+def run_chart_creation_workflow(original_args: argparse.Namespace, skip_cluster_check: bool = False, namespace: str = "default",
                                 auto_scope: bool = True) -> None:
     """Run the chart creation workflow with option for multiple charts."""
 
@@ -4026,7 +4029,7 @@ def run_chart_creation_workflow(skip_cluster_check: bool = False, namespace: str
                 break
 
             # Create a temporary args object for this chart
-            args = parse_args([])  # Empty args to get defaults
+            args = argparse.Namespace(**vars(original_args))
             apply_config_to_args(args, config)
 
             # Ensure we have a release name
@@ -4250,7 +4253,7 @@ def run_interactive_mode(args: argparse.Namespace) -> None:
         print(f"[*] Using specified namespace: {namespace}")
         auto_scope = False
 
-    run_chart_creation_workflow(skip_check, namespace, auto_scope)
+    run_chart_creation_workflow(args, skip_check, namespace, auto_scope)
 
 
 def run_demo_mode_legacy() -> None:
