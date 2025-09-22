@@ -3453,13 +3453,16 @@ class ChartExporter:
             ) from exc
 
     def _render_chart_yaml(self) -> str:
+        release = getattr(self.args, 'release', 'default-release')
+        chart_version = getattr(self.args, 'chart_version', '0.1.0')
+        app_version = getattr(self.args, 'app_version', '1.0.0')
         return (
             "apiVersion: v2\n"
-            f"name: {self.args.release}\n"
+            f"name: {release}\n"
             "description: Helm chart generated from an existing Kubernetes deployment\n"
             "type: application\n"
-            f"version: {self.args.chart_version}\n"
-            f"appVersion: \"{self.args.app_version}\"\n"
+            f"version: {chart_version}\n"
+            f'appVersion: "{app_version}"\n'
         )
 
     def _default_helmignore(self) -> str:
@@ -3486,7 +3489,9 @@ class ChartExporter:
     def _update_chart_metadata(self, exported: List[ExportResult]) -> None:
         """Update Chart.yaml with metadata extracted from actual resources."""
         # Extract app version from deployments if available
-        app_version = self.args.app_version
+        app_version = getattr(self.args, 'app_version', '1.0.0')
+        chart_version = getattr(self.args, 'chart_version', '0.1.0')
+        release = getattr(self.args, 'release', 'default-release')
         description = "Helm chart generated from an existing Kubernetes deployment"
 
         # Look for deployments to extract image tags for app version
