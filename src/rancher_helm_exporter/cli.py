@@ -3778,6 +3778,51 @@ STATE FLAGS (select application mode):
         help="Output directory for generated charts",
     )
 
+    config_group.add_argument(
+        "--chart-version",
+        default="0.1.0",
+        help="Chart version to set in Chart.yaml",
+    )
+    config_group.add_argument(
+        "--app-version",
+        default="1.0.0",
+        help="Application version to set in Chart.yaml",
+    )
+    config_group.add_argument(
+        "--prefix",
+        default="",
+        help="Prefix to prepend to generated manifest filenames",
+    )
+    config_group.add_argument(
+        "--include-secrets",
+        action="store_true",
+        help="Include Kubernetes Secret resources in the generated chart",
+    )
+    config_group.add_argument(
+        "--include-service-account-secrets",
+        action="store_true",
+        help="Also capture service account token secrets (implies --include-secrets)",
+    )
+    config_group.add_argument(
+        "--lint",
+        action="store_true",
+        help="Run 'helm lint' after generating the chart",
+    )
+    config_group.add_argument(
+        "--selector",
+        help="Label selector used to filter resources (e.g. app=my-app)",
+    )
+    config_group.add_argument(
+        "--only",
+        nargs="*",
+        help="Limit the export to the specified resource kinds",
+    )
+    config_group.add_argument(
+        "--exclude",
+        nargs="*",
+        help="Exclude specific resource kinds from the export",
+    )
+
     # === LEGACY COMPATIBILITY ===
     legacy_group = parser.add_argument_group('LEGACY COMPATIBILITY (deprecated)')
 
@@ -3844,6 +3889,7 @@ STATE FLAGS (select application mode):
     args.skip_cluster_check = getattr(args, 'offline', False)
     args.force = getattr(args, 'force_overwrite', False)
     args.auto_scope = getattr(args, 'auto_detect', False)
+    args.output_dir = getattr(args, 'output', './generated-chart')
 
     # Set default mode if no state flag is provided
     state_flags = [args.explore, args.configs, args.bulk, args.demo, args.debug]
@@ -4050,7 +4096,7 @@ def run_chart_creation_workflow(original_args: argparse.Namespace, skip_cluster_
 
             # Preview and validation step (unless explicitly disabled)
             selected_deployments = config.get('selected_deployments', [])
-            if selected_deployments and not args.no_preview:
+            if selected_deployments and not getattr(args, 'no_preview', False):
                 if not preview_chart_creation(selected_deployments, config, config.get('namespace', 'default')):
                     print("Chart creation cancelled due to validation issues.")
                     continue
