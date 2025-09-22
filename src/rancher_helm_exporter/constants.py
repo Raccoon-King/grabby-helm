@@ -206,7 +206,7 @@ SPECIAL_LABELS_TO_REMOVE: Final[Sequence[str]] = (
 DEFAULT_CHART_VERSION: Final[str] = "0.1.0"
 DEFAULT_APP_VERSION: Final[str] = "1.0.0"
 DEFAULT_NAMESPACE: Final[str] = "default"
-DEFAULT_OUTPUT_DIR: Final[str] = "./generated-chart"
+DEFAULT_OUTPUT_DIR: Final[str] = "./k8"
 
 # Retry configuration
 DEFAULT_RETRY_COUNT: Final[int] = 3

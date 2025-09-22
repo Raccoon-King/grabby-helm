@@ -3220,22 +3220,23 @@ class ChartExporter:
         return items  # type: ignore[return-value]
 
     def _should_include_manifest(self, resource: str, manifest: MutableMapping[str, object]) -> bool:
-        selected_names = self.selection_names.get(resource)
-        if selected_names is not None:
+        if self.selection_names:
+            selected_names = self.selection_names.get(resource)
+            if selected_names is None:
+                return False  # Resource type not selected
+            
             name = self._manifest_name(manifest)
             if name not in selected_names:
                 return False
-            if resource == "secrets":
-                return True
 
-        if resource == "secrets" and not self.args.include_secrets:
-            return False
-
-        if resource == "secrets" and not self.args.include_service_account_secrets:
-            secret_type = manifest.get("type")
-            if secret_type in _DEFAULT_SECRET_TYPES_TO_SKIP:
+        if resource == "secrets":
+            if not getattr(self.args, 'include_secrets', False):
                 return False
-
+            if not getattr(self.args, 'include_service_account_secrets', False):
+                secret_type = manifest.get("type")
+                if secret_type in _DEFAULT_SECRET_TYPES_TO_SKIP:
+                    return False
+        
         return True
 
     def _manifest_name(self, manifest: MutableMapping[str, object]) -> str:
@@ -3264,6 +3265,15 @@ class ChartExporter:
             labels = metadata.get("labels")
             if isinstance(labels, MutableMapping) and "pod-template-hash" in labels:
                 labels.pop("pod-template-hash", None)
+
+            # Add standard Helm labels
+            labels.update({
+                "helm.sh/chart": f"{{{{- include \"{getattr(self.args, 'release', 'default-release')}.name\" . -}}}}",
+                "app.kubernetes.io/name": f"{{{{- include \"{getattr(self.args, 'release', 'default-release')}.name\" . -}}}}",
+                "app.kubernetes.io/instance": "{{ .Release.Name }}",
+                "app.kubernetes.io/managed-by": "{{ .Release.Service }}",
+            })
+            metadata["labels"] = labels
 
             metadata.pop("namespace", None)
 
@@ -4098,6 +4108,18 @@ def run_chart_creation_workflow(original_args: argparse.Namespace, skip_cluster_
 
             # Create a temporary args object for this chart
             args = argparse.Namespace(**vars(original_args))
+
+            selection_names = {}
+            if 'selected_deployments' in config:
+                for deployment in config['selected_deployments']:
+                    selection_names.setdefault('deployments', set()).add(deployment['name'])
+            
+            if 'selected_dependencies' in config:
+                for resource_type, resources in config['selected_dependencies'].items():
+                    selection_names.setdefault(resource_type, set()).update(resources)
+            
+            config['selection_names'] = selection_names
+
             apply_config_to_args(args, config)
 
             # Ensure we have a release name
