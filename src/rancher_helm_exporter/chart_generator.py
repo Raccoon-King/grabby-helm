@@ -116,7 +116,8 @@ class ChartGenerator(ChartGeneratorProtocol):
             # Add template header
             template_content = f"""{{{{- if .Values.{resource_type}.enabled | default true }}}}
 ---
-{yaml_content}{{{{- end }}}}"""
+{yaml_content}
+{{{{- end }}}}"""
             
             output_file_path.write_text(template_content, encoding="utf-8")
             
