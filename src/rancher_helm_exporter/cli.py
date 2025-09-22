@@ -3738,6 +3738,12 @@ STATE FLAGS (select application mode):
         help="Debug mode - analyze cluster connectivity and permissions",
     )
 
+    command_group.add_argument(
+        "--dump-raw",
+        action="store_true",
+        help="Dump all resources from a namespace as raw YAML files",
+    )
+
     # === MODIFIER FLAGS (modify behavior) ===
     modifier_group = parser.add_argument_group('BEHAVIOR MODIFIERS')
 
@@ -4235,6 +4241,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             run_bulk_export_mode(args)
         elif args.explore:
             run_interactive_mode(args)
+        elif args.dump_raw:
+            namespace = args.namespace or prompt_required("Target namespace")
+            output_dir = args.output_dir or prompt_required("Output directory")
+            dump_raw_resources(namespace, output_dir, args.kubeconfig, args.context)
         else:
             # This should not happen due to default setting, but fallback to interactive
             run_interactive_mode(args)
@@ -4378,3 +4388,43 @@ def run_demo_mode_legacy() -> None:
 
 if __name__ == "__main__":  # pragma: no cover
     main()
+
+def dump_raw_resources(namespace: str, output_dir: str, kubeconfig: Optional[str], context: Optional[str]) -> None:
+    """Fetch all resources from a namespace and dump them as raw YAML files."""
+    logger = logging.getLogger("rancher_helm_exporter")
+    output_path = Path(output_dir).expanduser().resolve()
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    kubectl_base = ["kubectl"]
+    if kubeconfig:
+        kubectl_base.extend(["--kubeconfig", kubeconfig])
+    if context:
+        kubectl_base.extend(["--context", context])
+
+    for resource in SUPPORTED_RESOURCES:
+        try:
+            cmd = [*kubectl_base, "get", resource, "-n", namespace, "-o", "yaml"]
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            
+            if result.stdout:
+                # The output of "kubectl get -o yaml" for multiple resources is a list of documents.
+                # We need to split them and save them as individual files.
+                import yaml
+                
+                documents = yaml.safe_load_all(result.stdout)
+                for doc in documents:
+                    if doc and "kind" in doc and "metadata" in doc:
+                        kind = doc["kind"].lower()
+                        name = doc["metadata"]["name"]
+                        filename = f"{kind}-{name}.yaml"
+                        file_path = output_path / filename
+                        
+                        with file_path.open("w", encoding="utf-8") as f:
+                            yaml.dump(doc, f, default_flow_style=False)
+                        
+                        logger.info(f"Dumped {kind}/{name} to {file_path}")
+
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Failed to get {resource} in namespace {namespace}: {e.stderr}")
+        except Exception as e:
+            logger.error(f"An error occurred while processing {resource}: {e}")
